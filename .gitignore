@@ -1,0 +1,37 @@
+# Pihu Agent — Professional Gitignore
+# -----------------------------------------------------------------------------
+
+# Runtime Data
+data/
+data/memory/
+data/logs/
+*.log
+*.txt
+*.json
+!package.json
+!taskweaver_config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Workspace / IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Third Party
+third_party/taskweaver/project/temp/
+third_party/taskweaver/project/logs/
+node_modules/
+
+# Media / Artifacts
+assets/
+Gemini_Generated_Image_*.png
+grid_preview.jpg
