@@ -18,18 +18,14 @@ class CloudLLM:
 
     def __init__(self):
         import config
-        from config import (
-            NVIDIA_NIM_API_KEY, NVIDIA_NIM_BASE_URL,
-            CLOUD_LLM_MODEL, CLOUD_LLM_TIMEOUT_S,
-            CLOUD_LLM_MAX_TOKENS,
-        )
-
-        self.api_key = NVIDIA_NIM_API_KEY
-        self.base_url = NVIDIA_NIM_BASE_URL
-        self.model = CLOUD_LLM_MODEL
-        self.vision_model = getattr(config, "CLOUD_VISION_MODEL", CLOUD_LLM_MODEL)
-        self.timeout = CLOUD_LLM_TIMEOUT_S
-        self.max_tokens = CLOUD_LLM_MAX_TOKENS
+        self.api_key = getattr(config, "NVIDIA_NIM_API_KEY", "")
+        self.base_url = getattr(config, "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+        self.model = getattr(config, "CLOUD_LLM_MODEL", "meta/llama-3.1-70b-instruct")
+        self.vision_model = getattr(config, "CLOUD_VISION_MODEL", "meta/llama-3.2-11b-vision-instruct")
+        self.timeout = getattr(config, "CLOUD_LLM_TIMEOUT_S", 10)
+        self.max_tokens = getattr(config, "CLOUD_LLM_MAX_TOKENS", 4096)
+        self.temperature = getattr(config, "CLOUD_LLM_TEMPERATURE", 0.4)
+        self.top_p = getattr(config, "CLOUD_LLM_TOP_P", 0.9)
 
         if not self.api_key:
             log.warning("⚠️ NVIDIA NIM API key not set — cloud LLM unavailable")
@@ -71,8 +67,8 @@ class CloudLLM:
             "model": self.model,
             "messages": messages,
             "max_tokens": self.max_tokens,
-            "temperature": 1.00,
-            "top_p": 1.00,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
             "stream": stream,
         }
 

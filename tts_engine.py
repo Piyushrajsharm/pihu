@@ -32,9 +32,11 @@ class TTSEngine:
         try:
             # 1. Initialize the Kokoro Backend
             self.engine = KokoroEngine(
-                voice=self.voice,
-                speed=self.speed
+                voice=self.voice
             )
+            # Try to set speed if attribute exists
+            if hasattr(self.engine, "speed"):
+                self.engine.speed = self.speed
             
             # 2. Initialize the Streaming Wrapper
             self.stream = TextToAudioStream(self.engine)

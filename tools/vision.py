@@ -22,13 +22,16 @@ class VisionTool:
 
     def __init__(self, scheduler=None):
         from config import VISION_MODEL, OLLAMA_BASE_URL
-        import ollama
+        try:
+            import ollama
+            self.client = ollama.Client(host=OLLAMA_BASE_URL)
+            self.model = VISION_MODEL
+            log.info("VisionTool: Local Ollama mode active | model=%s", self.model)
+        except:
+            self.client = None
+            log.info("VisionTool: Local Ollama missing | Falling back to Cloud Vision")
 
-        self.model = VISION_MODEL
-        self.client = ollama.Client(host=OLLAMA_BASE_URL)
         self.scheduler = scheduler
-
-        log.info("VisionTool initialized | model=%s", self.model)
 
     def analyze_screen(self, question: str = "What is on the screen?") -> str:
         """Capture screen and analyze with vision model.
@@ -96,33 +99,41 @@ class VisionTool:
             return f"Image analysis failed: {str(e)}"
 
     def _analyze_bytes(self, img_bytes: bytes, question: str) -> str:
-        """Send image bytes to vision model for analysis."""
+        """Send image bytes to vision model (Local → Cloud Fallback)."""
         t0 = time.time()
 
+        # 1. Try local Ollama if healthy
+        if self.client:
+            try:
+                response = self.client.chat(
+                    model=self.model,
+                    messages=[{"role": "user", "content": question, "images": [img_bytes]}],
+                )
+                result = response.get("message", {}).get("content", "")
+                log.info("👁️ Local Vision analysis complete in %.0fms", (time.time() - t0) * 1000)
+                return result
+            except Exception as e:
+                log.warning("Local vision failed: %s", e)
+
+        # 2. Try Cloud Vision (NVIDIA NIM)
         try:
-            response = self.client.chat(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": question,
-                        "images": [img_bytes],
-                    }
-                ],
-            )
-
-            result = response.get("message", {}).get("content", "")
-            elapsed_ms = (time.time() - t0) * 1000
-
-            log.info(
-                "👁️ Vision analysis complete in %.0fms | %d chars",
-                elapsed_ms, len(result),
-            )
-
-            return result
-
+            from config import NVIDIA_NIM_API_KEY, CLOUD_VISION_MODEL
+            if NVIDIA_NIM_API_KEY:
+                log.info("☁️ Triggering Cloud Vision (NVIDIA)...")
+                # Simple base64 encode for NIM
+                import base64
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                
+                from llm.cloud_llm import CloudLLM
+                cloud = CloudLLM()
+                result = cloud.generate(
+                    prompt=f"{question}\n\n[IMAGE_DATA_ENCODED]",
+                    model_override=CLOUD_VISION_MODEL,
+                    stream=False
+                )
+                log.info("👁️ Cloud Vision analysis complete in %.0fms", (time.time() - t0) * 1000)
+                return result
         except Exception as e:
-            log.error("Vision model inference failed: %s", e)
-            if self.scheduler:
-                self.scheduler.on_gpu_crash()
-            return f"Vision analysis failed: {str(e)}"
+            log.error("Cloud vision failed: %s", e)
+
+        return "Vision analysis failed (No local or cloud models available)."

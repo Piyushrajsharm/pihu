@@ -142,12 +142,12 @@ class IntentClassifier:
         # If no pattern matched or confidence was borderline
         best_score = max(scores.values()) if scores else 0
         if best_score < self.confidence_threshold:
-            from llm.groq_llm import GroqLLM
-            llm = GroqLLM()
-            if llm.is_available:
-                log.info("🔍 Ambiguous intent detected (score %.2f) — triggering LLM classifier", best_score)
-                intent = self.classify_with_llm(text_clean, llm)
-                log.info("🎯 LLM re-classified as: %s", intent.type)
+            from llm.cloud_llm import CloudLLM
+            cloud = CloudLLM()
+            if cloud.is_available:
+                log.info("🔍 Ambiguous intent detected (score %.2f) — triggering cloud LLM classifier", best_score)
+                intent = self.classify_with_llm(text_clean, cloud)
+                log.info("🎯 Cloud LLM re-classified as: %s", intent.type)
                 return intent
 
         # Step 3: Default to chat

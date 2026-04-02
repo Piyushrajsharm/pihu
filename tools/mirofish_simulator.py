@@ -41,17 +41,17 @@ class MiroFishSimulator:
         # Build analysis prompt
         prompt = self._build_analysis_prompt(query, data_context)
 
-        # Try to use Groq first (fastest), then Cloud LLM
+        # Use LocalLLM for analysis
         try:
-            from config import GROQ_API_KEY, GROQ_MODEL
-            if GROQ_API_KEY:
-                prediction = self._predict_via_groq(prompt)
-                if prediction:
-                    elapsed = time.time() - t0
-                    log.info("🐟 Prediction complete in %.1fs", elapsed)
-                    return self._format_prediction(query, prediction, elapsed)
+            from llm.local_llm import LocalLLM
+            llm = LocalLLM()
+            prediction = llm.generate(prompt, stream=False)
+            if prediction:
+                elapsed = time.time() - t0
+                log.info("🐟 Prediction complete in %.1fs", elapsed)
+                return self._format_prediction(query, prediction, elapsed)
         except Exception as e:
-            log.warning("Groq prediction failed: %s", e)
+            log.warning("Local simulation failed: %s", e)
 
         # Fallback: pattern-based response
         return self._pattern_prediction(query)

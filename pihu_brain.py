@@ -52,7 +52,7 @@ class PihuBrain:
         from audio_io import MicrophoneStream, AudioPlayer
         from memory_engine import MemoryEngine
         from intent_classifier import IntentClassifier
-        from llm.local_llm import LocalLLM
+        from llm.llama_cpp_llm import LlamaCppLLM
         from llm.cloud_llm import CloudLLM
         from tools.web_search import WebSearch
         from tools.vision import VisionTool
@@ -87,14 +87,11 @@ class PihuBrain:
         # 6. Intent Classifier
         self.intent_classifier = IntentClassifier()
 
-        # 7. LLMs
-        local_llm = LocalLLM(scheduler=self.scheduler)
+        # 7. LLMs (Native Direct Loading — No Ollama)
+        local_llm = LlamaCppLLM(scheduler=self.scheduler)
         cloud_llm = CloudLLM()
 
-        from llm.groq_llm import GroqLLM
-        groq_llm = GroqLLM()
-
-        # Check local models
+        # Check native model status
         local_llm.check_models()
 
         # 8. Tools
@@ -102,18 +99,18 @@ class PihuBrain:
         vision = VisionTool(scheduler=self.scheduler)
         grounding = VisionGrounding(cloud_llm=cloud_llm)
         automation = AutomationTool(llm_client=cloud_llm, grounding_tool=grounding)
-        swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=groq_llm)
+        swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=None)
         mcp = MCPDispatcher()
 
         # 8.5 OpenClaw Orchestrator
         from openclaw_bridge import OpenClawBridge
-        openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=groq_llm)
+        openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=None)
 
-        # 9. Router
+        # 9. Router (Primary Engine is now LocalLLM)
         self.router = Router(
             local_llm=local_llm,
             cloud_llm=cloud_llm,
-            groq_llm=groq_llm,
+            groq_llm=None,
             memory=self.memory,
             scheduler=self.scheduler,
             web_search=web_search,

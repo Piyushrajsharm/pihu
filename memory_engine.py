@@ -2,6 +2,7 @@
 Pihu — Semantic Memory Layer
 Stores persistent user preferences and recurring behaviors.
 """
+import os
 import json
 from pathlib import Path
 from logger import get_logger
@@ -65,21 +66,22 @@ class MemoryEngine:
                 "vector_store": {
                     "provider": "qdrant",
                     "config": {
-                        "collection_name": "pihu_memory_v3",
-                        "path": str(Path(mem_dir) / "mem0_qdrant_v3")
+                        "collection_name": "pihu_memory_v4",
+                        "path": str(Path(mem_dir) / "mem0_qdrant_v4")
                     }
                 },
                 "llm": {
-                    "provider": "ollama",
+                    "provider": "openai", # NIM compatible
                     "config": {
-                        "model": "qwen2.5:3b",
-                        "temperature": 0.0,
+                        "api_key": os.getenv("NVIDIA_NIM_API_KEY"),
+                        "model": "meta/llama-3.1-70b-instruct",
+                        "base_url": "https://integrate.api.nvidia.com/v1"
                     }
                 },
                 "embedder": {
-                    "provider": "ollama",
+                    "provider": "local", # Stable, No Ollama, No Crash
                     "config": {
-                        "model": "nomic-embed-text:latest",
+                        "model": "all-MiniLM-L6-v2"
                     }
                 }
             }

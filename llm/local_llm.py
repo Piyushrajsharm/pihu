@@ -119,14 +119,24 @@ class LocalLLM:
         first_token_logged = False
         num_predict = max_tok or self.max_tokens
 
+        # TurboQuant optimization (KV cache compression)
+        options = {
+            "temperature": self.temperature,
+            "num_predict": num_predict,
+        }
+        
+        from config import TURBOQUANT_ENABLED
+        if TURBOQUANT_ENABLED:
+            # Enabling 4-bit KV cache quantization (TurboQuant behavior)
+            # Note: requires Ollama 0.1.34+ or supporting backend
+            options["kv_cache_type"] = "q4_0"
+            log.info("🚀 TurboQuant Active: 4-bit KV Cache Compression enabled")
+
         response = self.client.chat(
             model=model,
             messages=messages,
             stream=True,
-            options={
-                "temperature": self.temperature,
-                "num_predict": num_predict,
-            },
+            options=options,
         )
 
         # Filter out <think>...</think> blocks (qwen3 "thinking" tokens)

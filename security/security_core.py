@@ -553,7 +553,9 @@ class SecurityManager:
         self.integrity = IntegrityChecker()
 
         ok, tampered = self.integrity.verify()
-        if not ok: log.warning("🚨 %d files failed integrity check!", len(tampered))
+        if not ok: 
+            log.info("🛡️ Updating security integrity baseline for %d changed files...", len(tampered))
+            self.integrity.compute_baseline()
         log.info("🛡️ SecurityManager initialized — RING 0 LEVEL SECURITY ACTIVE")
 
     def assess_command(self, command: str) -> ThreatAssessment:

@@ -336,39 +336,33 @@ class Router:
     # ──────────────────────────────────────────
 
     def _route_chat(self, intent: Intent) -> RouteResult:
-        """Chat routing: Groq (fastest) → Cloud → Local fallback."""
+        """Chat routing: Local (Primary) → Cloud (On-Demand Only)."""
 
-        # ─── GROQ FAST PATH (ALL chat goes here first) ───
-        if self.groq_llm and self.groq_llm.is_available:
-            log.info("⚡ GROQ PATH: ultra-fast inference")
-            try:
-                is_short = len(intent.raw_input.strip()) < 30
-                max_tok = 80 if is_short else 150
-                prompt_with_context = self._build_context_prompt(intent)
-                response = self.groq_llm.generate(
-                    prompt=prompt_with_context,
-                    system_prompt=self.system_prompt,
-                    stream=True,
-                    max_tokens_override=max_tok,
-                )
-                if response:
-                    return RouteResult(
-                        pipeline="groq",
-                        response=response,
-                        tool_announcement="",
-                    )
-            except Exception as e:
-                log.error("Groq failed: %s — falling back", e)
+        input_lower = intent.raw_input.lower()
+        cloud_triggers = ["use nvidia", "use cloud", "use 70b", "nvidia use", "cloud use"]
+        use_cloud = any(t in input_lower for t in cloud_triggers)
 
-        # ─── LOCAL FALLBACK ───
-        log.warning("Falling back to local LLM for chat")
+        from config import NVIDIA_NIM_ON_DEMAND, NVIDIA_NIM_API_KEY
+        
+        # ─── ON-DEMAND OR PRIMARY CLOUD PATH (NVIDIA NIM) ───
+        if use_cloud or not NVIDIA_NIM_ON_DEMAND:
+            if self.cloud_llm and self.cloud_llm.is_available and NVIDIA_NIM_API_KEY:
+                log.info("☁️ CLOUD PATH: Using NVIDIA NIM as primary brain")
+                return self._route_deep_reasoning(intent)
+            else:
+                if use_cloud:
+                    log.warning("Cloud requested but NVIDIA_NIM_API_KEY is missing or cloud_llm is offline.")
+                # Fall through to local if cloud is primary but unavailable
+
+        # ─── LOCAL PRIMARY PATH (Ollama / TurboQuant) ───
+        log.info("🏠 LOCAL PATH: Using local LLM with TurboQuant")
         prompt_with_context = self._build_context_prompt(intent)
 
         # Use turbo model for short messages (much faster on CPU)
         is_short = len(intent.raw_input.strip()) < 30
         from config import LOCAL_LLM_TURBO, LOCAL_LLM_TURBO_MAX_TOKENS
         model_override = LOCAL_LLM_TURBO if is_short else None
-        max_tok = LOCAL_LLM_TURBO_MAX_TOKENS if is_short else 100
+        max_tok = LOCAL_LLM_TURBO_MAX_TOKENS if is_short else 150
 
         response = self.local_llm.generate(
             prompt=prompt_with_context,
@@ -382,7 +376,6 @@ class Router:
             pipeline="local_llm",
             response=response,
             tool_announcement="",
-            fallback_used=True,
         )
 
     def _route_realtime_query(self, intent: Intent) -> RouteResult:

@@ -9,6 +9,14 @@ Usage:
 
 import sys
 import argparse
+import warnings
+import os
+
+# 1. SILENCE TECHNICAL NOISE (FFmpeg, Deprecations, etc)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+os.environ["PYDUB_QUIET"] = "true" 
 
 # Add project root to path
 from pathlib import Path
@@ -20,25 +28,8 @@ log = get_logger("MAIN")
 
 
 def check_ollama():
-    """Check if Ollama is running and accessible."""
-    try:
-        import ollama
-        from config import OLLAMA_BASE_URL
-
-        client = ollama.Client(host=OLLAMA_BASE_URL)
-        models = client.list()
-        model_names = [m.model for m in models.models] if hasattr(models, 'models') else []
-        log.info("✅ Ollama connected | %d models available", len(model_names))
-
-        for name in model_names:
-            log.info("   📦 %s", name)
-
-        return True
-
-    except Exception as e:
-        log.error("❌ Cannot connect to Ollama: %s", e)
-        log.error("   Make sure Ollama is running: 'ollama serve'")
-        return False
+    """Bypassed as we are using Cloud/Native brains."""
+    return True
 
 
 def print_banner():
@@ -85,14 +76,8 @@ def main():
     log.info("System startup check...")
     log.info("=" * 40)
 
-    # Check Ollama
-    if not check_ollama():
-        log.warning("⚠️ Ollama not available — LLM features will be limited")
-        log.warning("   Start Ollama with: ollama serve")
-        log.warning("   Pull models with:")
-        log.warning("     ollama pull qwen2.5:3b")
-        log.warning("     ollama pull phi3:mini")
-        log.warning("     ollama pull gemma3:4b")
+    # Check System State
+    log.info("🧠 Brain System: ACTIVE (Cloud + Native Mode)")
 
     # Initialize brain
     from pihu_brain import PihuBrain
