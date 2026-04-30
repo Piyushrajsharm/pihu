@@ -64,10 +64,12 @@ def main():
     )
     args = parser.parse_args()
     
-    # Silence technical logs in text mode for a cleaner UI
-    if args.text:
+    # Silence technical logs immediately in text mode for a cleaner UI
+    if "--text" in sys.argv:
+        os.environ["PIHU_STEALTH_MODE"] = "1"
         import logging
-        logging.getLogger("pihu").setLevel(logging.WARNING)
+        for logger_name in ["pihu", "HARDWARE", "LLM", "CLOUD", "ROUTER", "MEMORY", "STT", "TTS", "VISION"]:
+            logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
     print_banner()
 
@@ -105,14 +107,17 @@ def main():
 
 def main_forever():
     """Immortal wrapper — restarts main() on any crash.
-    
+
     The agent NEVER terminates unless the user explicitly kills the process.
     """
     import traceback
+    from config import (
+        MAX_RAPID_RESTARTS,
+        RAPID_RESTART_WINDOW_SECONDS,
+        RESTART_COOLDOWN_SECONDS,
+    )
 
     restart_count = 0
-    max_rapid_restarts = 10
-    rapid_restart_window_s = 60
     restart_timestamps = []
 
     while True:
@@ -142,24 +147,24 @@ def main_forever():
             now = time.time()
             restart_timestamps.append(now)
 
-            # Prune old timestamps
-            restart_timestamps = [
-                t for t in restart_timestamps if now - t < rapid_restart_window_s
-            ]
+        # Prune old timestamps
+        restart_timestamps = [
+            t for t in restart_timestamps if now - t < RAPID_RESTART_WINDOW_SECONDS
+        ]
 
-            if len(restart_timestamps) >= max_rapid_restarts:
-                log.critical(
-                    "💀 %d crashes in %ds — entering cooldown (30s)",
-                    max_rapid_restarts, rapid_restart_window_s,
-                )
-                traceback.print_exc()
-                time.sleep(30)
-                restart_timestamps.clear()
-            else:
-                log.error("💥 Crash #%d: %s", restart_count, e)
-                traceback.print_exc()
-                log.info("🔄 Auto-restarting in 3 seconds...")
-                time.sleep(3)
+        if len(restart_timestamps) >= MAX_RAPID_RESTARTS:
+            log.critical(
+                "💀 %d crashes in %ds — entering cooldown (%ds)",
+                MAX_RAPID_RESTARTS, RAPID_RESTART_WINDOW_SECONDS, RESTART_COOLDOWN_SECONDS,
+            )
+            traceback.print_exc()
+            time.sleep(RESTART_COOLDOWN_SECONDS)
+            restart_timestamps.clear()
+        else:
+            log.error("💥 Crash #%d: %s", restart_count, e)
+            traceback.print_exc()
+            log.info("🔄 Auto-restarting in 5 seconds (Cooldown to prevent terminal flicker)...")
+            time.sleep(5)
 
 
 if __name__ == "__main__":

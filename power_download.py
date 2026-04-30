@@ -12,7 +12,7 @@ def power_download():
     
     os.makedirs(target_dir, exist_ok=True)
     
-    print(f"🚀 [POWER DOWNLOAD] Target: {target_path}")
+    print(f"[*] [POWER DOWNLOAD] Target: {target_path}")
     
     try:
         # Download (will resume if partial file exists)
@@ -23,18 +23,18 @@ def power_download():
             force_download=False,
         )
         
-        print(f"📦 [POWER DOWNLOAD] Cached at: {cache_path}")
+        print(f"[*] [POWER DOWNLOAD] Cached at: {cache_path}")
         
         # Move to target if not already there
         if os.path.exists(cache_path) and not os.path.exists(target_path):
-            print(f"🚚 [POWER DOWNLOAD] Copying to workspace...")
+            print(f"[*] [POWER DOWNLOAD] Copying to workspace...")
             shutil.copy2(cache_path, target_path)
-            print("✅ [POWER DOWNLOAD] Done!")
+            print("[+] [POWER DOWNLOAD] Done!")
         elif os.path.exists(target_path):
-            print("✅ [POWER DOWNLOAD] File already in workspace.")
+            print("[+] [POWER DOWNLOAD] File already in workspace.")
             
     except Exception as e:
-        print(f"❌ [POWER DOWNLOAD] Error: {e}")
+        print(f"[!] [POWER DOWNLOAD] Error: {e}")
         # Auto-retry in 10 seconds?
         time.sleep(10)
         sys.exit(1)

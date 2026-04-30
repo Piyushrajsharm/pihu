@@ -33,6 +33,7 @@ class IntentClassifier:
     - vision_analysis: Screen/image analysis
     - ui_generation: UI creation via MCP
     - system_command: Local system execution
+    - prediction: MiroFish swarm intelligence predictions
     
     Approach: Keyword patterns first (fast), LLM fallback if ambiguous.
     """
@@ -47,8 +48,8 @@ class IntentClassifier:
         r"\b(what is happening|trending|update|score)\b",
         r"\b(google|search for|look up|find out)\b",
         # Hindi / Hinglish
-        r"\b(khoj|dhundh|abhi|aaj|kya ho raha|taza|latest news)\b",
-        r"\b(kya chal raha|market|price kya)\b",
+        r"\b(khoj|dhundh|taza|latest news)\b",
+        r"\b(market|price kya)\b",
     ]
 
     VISION_PATTERNS = [
@@ -71,16 +72,28 @@ class IntentClassifier:
         r"\b(generate.*ui|make.*website|bana.*page)\b",
         r"\b(ui.*bana|interface.*design|layout.*create)\b",
         r"\b(html|webpage|dashboard.*create)\b",
+        r"\b(build.*dashboard|dashboard.*build|build.*website|create.*dashboard)\b",
     ]
 
     SYSTEM_COMMAND_PATTERNS = [
-        r"\b(open|close|run|execute|launch|start|stop)\b",
+        r"\b(open|close|run|execute|launch|start|stop)\s+(?:the\s+)?(?:app|program|terminal|cmd|powershell|chrome|browser|notepad|calculator|vlc|spotify|server|service|script|file|folder|process|whatsapp|excel|powerbi|power bi|downloads|documents|desktop|settings|task manager)\b",
+        r"^\s*(?:hey\s+)?pihu[:,\s]+(?:open|launch|start|run|kholo|khol|chalao|type|write|likho|press|hit|click|scroll|focus|switch to|close|google|youtube|search|move|drag|maximize|minimize|snap|copy|paste)\b",
+        r"^\s*(?:open|launch|start|run|kholo|khol|chalao|show|go to)\s+(?:youtube|google|gmail|github|chatgpt|settings|paint|camera|photos|file explorer|vs code|vscode|downloads|documents|desktop|project|workspace|task manager)\b",
+        r"\b(copy|paste|select all|save|undo|redo|new tab|close tab|task manager|show desktop|voice typing|dictation|address bar|clipboard)\b",
+        r"\b(scroll up|scroll down|volume up|volume down|mute|focus|switch to|maximize|minimize|snap left|snap right|right click|double click|move mouse|drag)\b",
+        r"^\s*(?:run command|execute command|shell command|terminal command|powershell command|cmd command)\b",
         r"\b(shutdown|restart|volume|brightness)\b",
         r"\b(khol|kholo|band kar|chala|chalao|terminal|cmd)\b",
         r"\b(install|uninstall|delete file|create folder)\b",
         r"\b(type|likh|likho|click|press|key|mouse)\b",
-        r"\b(whatsapp|browser|chrome|notepad|calculator|vlc|spotify)\b",
-        r"\b(excel|powerbi|power bi|dashboard|csv|data clea[nr]|build)\b",
+    ]
+
+    PREDICTION_PATTERNS = [
+        r"\b(predict|forecast|prediction|bhavishya)\b",
+        r"\b(mirofish|swarm.*predict|swarm.*analy)\b",
+        r"\b(market.*analysis|trend.*forecast)\b",
+        r"\b(what will happen|kya hoga|future.*trend)\b",
+        r"\b(bull|bear|sentiment.*analy|risk.*assess)\b",
     ]
 
     def __init__(self):
@@ -94,6 +107,7 @@ class IntentClassifier:
             "deep_reasoning": [re.compile(p, re.IGNORECASE) for p in self.DEEP_REASONING_PATTERNS],
             "ui_generation": [re.compile(p, re.IGNORECASE) for p in self.UI_GENERATION_PATTERNS],
             "system_command": [re.compile(p, re.IGNORECASE) for p in self.SYSTEM_COMMAND_PATTERNS],
+            "prediction": [re.compile(p, re.IGNORECASE) for p in self.PREDICTION_PATTERNS],
         }
 
         log.info("IntentClassifier initialized | %d pattern groups", len(self._patterns))
@@ -138,17 +152,12 @@ class IntentClassifier:
                 )
                 return intent
 
-        # Step 2: LLM Fallback (Slow Path) for ambiguous intents
-        # If no pattern matched or confidence was borderline
+        # Step 2: Fallback (Fast Path) for ambiguous intents
+        # We NO LONGER call the slow Cloud LLM for intent classification.
+        # This achieves 0ms latency. If it's ambiguous, it's just a chat.
         best_score = max(scores.values()) if scores else 0
-        if best_score < self.confidence_threshold:
-            from llm.cloud_llm import CloudLLM
-            cloud = CloudLLM()
-            if cloud.is_available:
-                log.info("🔍 Ambiguous intent detected (score %.2f) — triggering cloud LLM classifier", best_score)
-                intent = self.classify_with_llm(text_clean, cloud)
-                log.info("🎯 Cloud LLM re-classified as: %s", intent.type)
-                return intent
+        if best_score > 0:
+            log.info("Ambiguous intent detected (score %.2f) — defaulting to local chat", best_score)
 
         # Step 3: Default to chat
         intent = Intent(
@@ -163,35 +172,7 @@ class IntentClassifier:
         )
         return intent
 
-    def classify_with_llm(self, text: str, llm_client) -> Intent:
-        """Use LLM to classify ambiguous intents.
-        
-        Called when keyword matching gives low confidence.
-        """
-        from config import INTENT_TYPES
 
-        prompt = f"""Classify this user input into exactly ONE category.
-Categories: {', '.join(INTENT_TYPES)}
-
-User input: "{text}"
-
-Respond with ONLY the category name, nothing else."""
-
-        try:
-            response = llm_client.generate(prompt, stream=False)
-            response = response.strip().lower()
-
-            if response in INTENT_TYPES:
-                return Intent(
-                    type=response,
-                    confidence=0.75,
-                    metadata={"classified_by": "llm"},
-                    raw_input=text,
-                )
-        except Exception as e:
-            log.error("LLM classification failed: %s", e)
-
-        return Intent(type="chat", confidence=0.5, metadata={}, raw_input=text)
 
     def _score_patterns(self, text: str) -> dict[str, float]:
         """Score text against all pattern groups."""
@@ -202,6 +183,9 @@ Respond with ONLY the category name, nothing else."""
                 1 for p in patterns if p.search(text)
             )
             if match_count > 0:
+                if intent_type == "system_command":
+                    scores[intent_type] = min(0.72 + (match_count - 1) * 0.14, 1.0)
+                    continue
                 # Score = matches / total patterns, capped at 1.0
                 scores[intent_type] = min(match_count / max(len(patterns) * 0.3, 1), 1.0)
 

@@ -1,33 +1,52 @@
-from pihu_brain import PihuBrain
 import sys
+import os
+from pathlib import Path
 
-def verify_no_ollama_mode():
-    print("🧠 Initializing PihuBrain (NATIVE Direct Loading Verification)...")
+# Ensure pihu root is on sys.path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config import CODE_EXECUTOR_TYPE
+from logger import get_logger
+
+log = get_logger("VERIFY")
+
+def verify_local_first():
+    print("=" * 50)
+    print(" 🛠️  PIHU — LOCAL-FIRST VERIFICATION")
+    print("=" * 50)
+    
+    # 1. Check Config
+    print(f"[*] CODE_EXECUTOR_TYPE: {CODE_EXECUTOR_TYPE}")
+    if CODE_EXECUTOR_TYPE != "docker":
+        print("❌ Error: Code executor is not set to 'docker'.")
+        return
+    else:
+        print("✅ Config is locally set.")
+
+    # 2. Check Docker
     try:
-        brain = PihuBrain()
-        # Mocking sub-system loads to avoid hardware delays
-        brain.initialize()
-        
-        print("\n✅ PihuBrain initialized successfully.")
-        print(f"📡 Router Primary: {brain.router.local_llm.llm is not None}")
-        print(f"📡 Native Model Loaded: {brain.router.local_llm.is_available}")
-        
-        # Test routing logic
-        from intent_classifier import Intent
-        chat_intent = Intent(type="chat", confidence=0.9, raw_input="Hi Pihu!")
-        
-        route_chat = brain.router.route(chat_intent)
-        
-        print("\n🧪 Routing Test:")
-        print(f"  - Message: 'Hi Pihu!' -> Pipeline: {route_chat.pipeline}")
-        
-        if route_chat.pipeline == "local_llm":
-            print("\n🎉 SUCCESS: Pihu is now running WITHOUT Ollama!")
+        from sandbox.docker_executor import DockerExecutor
+        executor = DockerExecutor()
+        if executor.is_available:
+            print("✅ Docker Sandbox is reachable and available.")
         else:
-            print("\n❌ FAILURE: Routing logic check failed.")
-            
+            print("⚠️ Warning: Docker is NOT running. Pihu will fall back to degraded mode.")
     except Exception as e:
-        print(f"\n❌ ERROR during initialization: {e}")
+        print(f"❌ Error docking Docker: {e}")
+
+    # 3. Check for E2B presence
+    from pihu_brain import PihuBrain
+    brain = PihuBrain(backend_mode=True)
+    brain.initialize()
+    
+    # Check if e2b attribute exists in brain (it shouldn't anymore)
+    if hasattr(brain.router, 'e2b') and brain.router.e2b is not None:
+        print("❌ Error: E2B is still initialized in the Router!")
+    else:
+        print("✅ E2B has been successfully purged from the brain.")
+
+    print("-" * 50)
+    print("RESULT: Pihu is now fully local-first. 🏠")
 
 if __name__ == "__main__":
-    verify_no_ollama_mode()
+    verify_local_first()

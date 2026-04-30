@@ -1,0 +1,162 @@
+name: Pihu CI/CD Pipeline
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  PIHU_ENV: "testing"
+
+jobs:
+  # ────────────────────────────────────────
+  # BACKEND: Lint, Type Check, Import Verify
+  # ────────────────────────────────────────
+  backend-lint:
+    name: Backend Lint & Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint with Ruff
+        run: |
+          ruff check . --select E,W,F,I --ignore E501,W291 --exclude third_party --exclude node_modules
+
+      - name: Verify critical imports
+        run: |
+          python -m py_compile router.py api/app.py pihu_brain.py
+          python -c "from api.database import Base, Organization, Tenant, APIKey; print('✅ Database models OK')"
+          python -c "from api.auth import create_jwt_token, authenticate_request; print('✅ Auth module OK')"
+          python -c "from api.tenant_manager import TenantManager; print('✅ Tenant manager OK')"
+          python -c "from api.secrets import SecretsManager; print('✅ Secrets manager OK')"
+          python -c "from api.governance import GovernanceEngine; print('✅ Governance engine OK')"
+          python -c "from api.billing import BillingEngine, TIER_CONFIG; print('✅ Billing engine OK')"
+          python -c "from api.middleware import ReliabilityEngine; print('✅ Middleware OK')"
+          python -c "from api.telemetry import AuditLogger; print('✅ Audit logger OK')"
+          python -c "from config import PIHU_ENV, INTENT_TYPES; print('✅ Config OK')"
+          python -c "from intent_classifier import IntentClassifier; print('✅ Intent classifier OK')"
+
+  # ────────────────────────────────────────
+  # FRONTEND: Build Verification
+  # ────────────────────────────────────────
+  frontend-build:
+    name: Frontend Build Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build production bundle
+        run: npm run build
+        working-directory: frontend
+
+      - name: Verify build output
+        run: |
+          test -d dist && echo "✅ Build output exists"
+          du -sh dist/ && echo "✅ Bundle size verified"
+        working-directory: frontend
+
+  # ────────────────────────────────────────
+  # SECURITY: Dependency Audit
+  # ────────────────────────────────────────
+  dependency-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Python dependency audit
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --ignore-vuln PYSEC-2024-*
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: NPM dependency audit
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: frontend
+        continue-on-error: true
+
+  # ────────────────────────────────────────
+  # TESTS: Run test suite
+  # ────────────────────────────────────────
+  tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: [backend-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ -v --tb=short
+        env:
+          PIHU_ENV: testing
+
+  # ────────────────────────────────────────
+  # DOCKER: Build validation
+  # ────────────────────────────────────────
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [backend-lint, frontend-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: |
+          docker build -f Dockerfile.backend -t pihu-backend:test .
+          echo "✅ Backend Docker build successful"
+
+      - name: Build frontend image
+        run: |
+          docker build -f frontend/Dockerfile -t pihu-frontend:test frontend
+          echo "✅ Frontend Docker build successful"

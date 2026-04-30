@@ -1,5 +1,5 @@
 """
-Pihu — Security Core (Military-Grade Final Paradigm)
+Pihu — Security Core (Defense-in-Depth Architecture)
 True AES-256-GCM, DPAPI Key Storage with Ctypes Memory Wiping.
 Atomic Hybrid Nonces, Tamper-Evident Hash Log with OS Registry Anchoring,
 and Predictive I/O + CPU Hardware Kill Switch.
@@ -547,9 +547,22 @@ class SecurityManager:
 
     def __init__(self):
         self.vault = Vault()
+        
+        # SecretBroker needs PolicyEngine, which we load globally or instantiate directly
+        from security.policy_engine import PolicyEngine
+        try:
+            self.policy_engine = PolicyEngine()
+        except Exception:
+            self.policy_engine = None
+            
+        from security.secret_broker import SecretBroker
+        self.secret_broker = SecretBroker(self.vault, self.policy_engine)
+        
+        from config import MAX_ACTIONS_PER_MINUTE
+
         self.audit = AuditLog()
         self.threat = ThreatAssessor()
-        self.sentinel = Sentinel(max_actions_per_minute=30)
+        self.sentinel = Sentinel(max_actions_per_minute=MAX_ACTIONS_PER_MINUTE)
         self.integrity = IntegrityChecker()
 
         ok, tampered = self.integrity.verify()

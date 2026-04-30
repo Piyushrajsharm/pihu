@@ -56,9 +56,13 @@ class Router:
         web_search=None,
         vision=None,
         automation=None,
+        voice_os=None,
         mcp=None,
         swarm=None,
         openclaw=None,
+        capability_negotiator=None,
+        backend_mode: bool = False,
+        user_id: str = "pihu_user",
     ):
         self.local_llm = local_llm
         self.cloud_llm = cloud_llm
@@ -68,32 +72,53 @@ class Router:
         self.web_search = web_search
         self.vision = vision
         self.automation = automation
+        self.voice_os = voice_os
         self.mcp = mcp
         self.swarm = swarm
         self.openclaw = openclaw
+        self.capability_negotiator = capability_negotiator
+        self.backend_mode = backend_mode
+        self.user_id = user_id
 
         from config import INTENT_CONFIDENCE_THRESHOLD, PERSONA
         self.confidence_threshold = INTENT_CONFIDENCE_THRESHOLD
         self.system_prompt = PERSONA["system_prompt"]
 
-        log.info("Router initialized | Groq=%s, OpenClaw=%s",
+        if self.voice_os is None and self.automation is not None and not self.backend_mode:
+            try:
+                from tools.voice_os_control import VoiceOSController
+
+                self.voice_os = VoiceOSController(automation=self.automation)
+            except Exception as e:
+                log.warning("Voice OS controller unavailable: %s", e)
+
+        log.info("Router initialized | Groq=%s, OpenClaw=%s, VoiceOS=%s",
                  "✅" if groq_llm and groq_llm.is_available else "❌",
-                 "✅" if openclaw else "❌")
+                 "✅" if openclaw else "❌",
+                 "✅" if self.voice_os else "❌")
                  
         from telemetry_logger import TelemetryCore
         self.telemetry = TelemetryCore()
         
-        from interpreter_engine import InterpreterEngine
-        self.interpreter_engine = InterpreterEngine()
-        
-        from ocr_engine import OCREngine
-        self.ocr_engine = OCREngine()
-        
-        from planner_engine import PlannerEngine
-        self.planner_engine = PlannerEngine(project_dir=str(Path(__file__).parent / "third_party" / "taskweaver" / "project"))
-        
-        from context_rag_engine import ContextRAGEngine
-        self.rag_engine = ContextRAGEngine()
+        if not self.backend_mode:
+            from interpreter_engine import InterpreterEngine
+            self.interpreter_engine = InterpreterEngine()
+            
+            from ocr_engine import OCREngine
+            self.ocr_engine = OCREngine()
+            
+            from planner_engine import PlannerEngine
+            self.planner_engine = PlannerEngine(project_dir=str(Path(__file__).parent / "third_party" / "taskweaver" / "project"))
+            
+            from context_rag_engine import ContextRAGEngine
+            self.rag_engine = ContextRAGEngine()
+        else:
+            self.interpreter_engine = None
+            self.ocr_engine = None
+            self.planner_engine = None
+            
+            from context_rag_engine import ContextRAGEngine
+            self.rag_engine = ContextRAGEngine() # Safe for backend mode (does not use OS)
 
     def route(self, intent: Intent) -> RouteResult:
         """Route an intent to the correct pipeline.
@@ -106,6 +131,11 @@ class Router:
         """
         log.info("Routing intent: %s (%.0f%%)", intent.type, intent.confidence * 100)
         input_lower = intent.raw_input.lower().strip()
+
+        # Voice OS confirmations can be short phrases like "confirm" or "cancel"
+        # that otherwise look like normal chat. Let the controller claim them first.
+        if self.voice_os and self.voice_os.can_handle(intent.raw_input):
+            return self._route_voice_os_command(intent)
 
         # 0. Weekly Review Bypass
         if "weekly review" in input_lower or "evaluate your week" in input_lower:
@@ -124,7 +154,7 @@ class Router:
                 self.memory.set_active_goal(goal_text)
                 return RouteResult(
                     pipeline="system",
-                    response=iter([f"Done babu, ab maine active goal track karna shuru kar diya: '{goal_text}'. Ab bhatakne nahi dungi tumko."]),
+                    response=iter([f"Done, maine active goal track karna shuru kar diya: '{goal_text}'. Ab focus isi par rakhenge."]),
                     tool_announcement=""
                 )
 
@@ -180,7 +210,7 @@ class Router:
                 log.info("Smart Initiative Triggered: '%s'", pattern)
                 return RouteResult(
                     pipeline="system",
-                    response=iter([f"ruko. tum har baar '{pattern}' kar rahe ho manually... pagal ho kya? main isko forever automate kar dun script se?"]),
+                    response=iter([f"Tum '{pattern}' baar-baar manually kar rahe ho. Chaho to main iske liye reusable automation bana sakti hoon."]),
                     tool_announcement=""
                 )
 
@@ -193,7 +223,7 @@ class Router:
                 log.warning("Intercepted Vague Intent. Forcing user to provide data.")
                 return RouteResult(
                     pipeline="local_llm", 
-                    response=iter(["kahan phata? code chipkao pehle ya error copy karke toh do, guess thodi karungi main hawa mein..."]),
+                    response=iter(["Issue kis jagah aa raha hai? Error message ya code paste kar do, phir main accurately debug kar paungi."]),
                     tool_announcement=""
                 )
 
@@ -234,10 +264,8 @@ class Router:
         if self.memory:
             if getattr(self.memory, "task_state", None) and self.memory.task_state.active:
                 self.memory.task_state.last_assistant_reply = full_text.strip()
-            # LLM generation is completely done. GPU is free.
-            # Trigger Mem0 background LLM extraction (0 latency cost to user)
-            if hasattr(self.memory, "update_memory_async"):
-                self.memory.update_memory_async(raw_input)
+            # Dialogue and long-term memory are owned by the caller so streaming
+            # routes do not duplicate user/assistant turns.
             
     # ──────────────────────────────────────────
     # Context Builder
@@ -335,6 +363,25 @@ class Router:
     # Route Handlers
     # ──────────────────────────────────────────
 
+    def _apply_tone_directive(self, prompt: str, intent: Intent) -> str:
+        """Apply optional UI-selected persona tone as a bounded style hint."""
+        tone = (intent.metadata or {}).get("tone")
+        tone_directives = {
+            "saheli": "Warm Hinglish, lightly flirty, caring, natural. Keep flirting respectful and non-explicit.",
+            "focus": "Focused Hinglish, practical, concise, engineering-sharp, with a warm companion tone.",
+            "masti": "Playful Hinglish, witty and bright, but still useful and respectful.",
+            "sherni": "Confident Hinglish, bold encouragement, crisp steps, supportive energy.",
+        }
+        directive = tone_directives.get(tone)
+        if not directive:
+            return prompt
+
+        return (
+            f"{prompt}\n\n"
+            f"[PIHU RESPONSE TONE: {directive} Treat the user's request above as the actual task. "
+            "Do not mention this tone directive.]"
+        )
+
     def _route_chat(self, intent: Intent) -> RouteResult:
         """Chat routing: Local (Primary) → Cloud (On-Demand Only)."""
 
@@ -356,13 +403,38 @@ class Router:
 
         # ─── LOCAL PRIMARY PATH (Ollama / TurboQuant) ───
         log.info("🏠 LOCAL PATH: Using local LLM with TurboQuant")
-        prompt_with_context = self._build_context_prompt(intent)
+        context_triggers = [
+            "this", "that", "ye", "yeh", "isko", "isme", "screen",
+            "clipboard", "copied", "error", "traceback", "phat", "fat gaya",
+            "chal nahi",
+        ]
+        needs_ambient_context = any(trigger in input_lower for trigger in context_triggers)
+        prompt_with_context = self._build_context_prompt(intent) if needs_ambient_context else intent.raw_input
+        prompt_with_context = self._apply_tone_directive(prompt_with_context, intent)
 
-        # Use turbo model for short messages (much faster on CPU)
+        chat_history = []
+        if self.memory and hasattr(self.memory, "get_short_term_context"):
+            try:
+                chat_history = self.memory.get_short_term_context() or []
+            except Exception as e:
+                log.warning("Short-term chat history unavailable: %s", e)
+                chat_history = []
+
+        if chat_history:
+            last_turn = chat_history[-1]
+            if (
+                last_turn.get("role") == "user"
+                and last_turn.get("content") == intent.raw_input
+            ):
+                chat_history = chat_history[:-1]
+
+        # Use turbo model only when explicitly configured. Tiny chat models often
+        # leak prompt text and flatten the girlfriend persona on short greetings.
         is_short = len(intent.raw_input.strip()) < 30
         from config import LOCAL_LLM_TURBO, LOCAL_LLM_TURBO_MAX_TOKENS
-        model_override = LOCAL_LLM_TURBO if is_short else None
-        max_tok = LOCAL_LLM_TURBO_MAX_TOKENS if is_short else 150
+        use_turbo = bool(LOCAL_LLM_TURBO) and is_short
+        model_override = LOCAL_LLM_TURBO if use_turbo else None
+        max_tok = LOCAL_LLM_TURBO_MAX_TOKENS if use_turbo else (80 if is_short else 180)
 
         response = self.local_llm.generate(
             prompt=prompt_with_context,
@@ -370,6 +442,17 @@ class Router:
             stream=True,
             model_override=model_override,
             max_tokens_override=max_tok,
+            conversation_history=chat_history,
+            stop_sequences=[
+                "\nUser:",
+                "\nAssistant:",
+                "\nSystem:",
+                "\nHuman:",
+                "\nAI:",
+                "CODING AND TASKS",
+                "CORE BEHAVIOR",
+                "ATTITUDE EXAMPLES",
+            ],
         )
 
         return RouteResult(
@@ -404,6 +487,7 @@ Search Results:
 User Question: {intent.raw_input}
 
 Answer in Hinglish naturally. Be factual — use only the search results."""
+            prompt = self._apply_tone_directive(prompt, intent)
 
             response = self.local_llm.generate(
                 prompt=prompt,
@@ -430,7 +514,7 @@ Answer in Hinglish naturally. Be factual — use only the search results."""
             try:
                 # Try cloud LLM (streaming)
                 response = self.cloud_llm.generate(
-                    prompt=intent.raw_input,
+                    prompt=self._apply_tone_directive(intent.raw_input, intent),
                     system_prompt=self.system_prompt,
                     stream=True,
                 )
@@ -447,7 +531,7 @@ Answer in Hinglish naturally. Be factual — use only the search results."""
         # Fallback to local LLM
         log.info("Cloud LLM unavailable/timed out, using local LLM")
         response = self.local_llm.generate(
-            prompt=intent.raw_input,
+            prompt=self._apply_tone_directive(intent.raw_input, intent),
             system_prompt=self.system_prompt,
             stream=True,
         )
@@ -528,6 +612,21 @@ Provide the HTML/CSS/JS code."""
         """System command → TaskWeaver Planner → OpenInterpreter Execution."""
         announcement = "🧠 Planning and executing..."
 
+        if self.backend_mode:
+            log.info("☁️ SAAS MODE: Routing to Isolated Cloud Sandbox (E2B)")
+            from api.sandbox_executor import CloudSandboxExecutor
+            
+            executor = CloudSandboxExecutor(tenant_id=self.user_id)
+            
+            return RouteResult(
+                pipeline="cloud_sandbox",
+                response=executor.extract_and_run(intent.raw_input),
+                tool_announcement="🚀 Cloud Secure Execution active...",
+            )
+
+        if self.voice_os and self.voice_os.can_handle(intent.raw_input):
+            return self._route_voice_os_command(intent)
+
         # 1. Complexity Shield (Architectural Hierarchy)
         input_low = intent.raw_input.lower()
         complex_triggers = ["and then", "first", "next", "after that", "analyze", "sequence", "fix and"]
@@ -573,7 +672,22 @@ Provide the HTML/CSS/JS code."""
 
         return RouteResult(
             pipeline="local_llm",
-            response=iter(["Arre Piyush, system engines available nahi hain. Ek baar installer check karlo please."]),
+            response=iter(["System execution engines available nahi hain. Installer/configuration check karna padega."]),
             tool_announcement="",
             fallback_used=True,
+        )
+
+    def _route_voice_os_command(self, intent: Intent) -> RouteResult:
+        """Route deterministic voice desktop commands."""
+        log.info("🎙️ Routing to deterministic Voice OS controller")
+        result = self.voice_os.execute(intent.raw_input)
+        return RouteResult(
+            pipeline="voice_os",
+            response=iter([result.message]),
+            tool_announcement="",
+            metadata={
+                "success": result.success,
+                "pending_confirmation": result.pending_confirmation,
+            },
+            fallback_used=not result.success,
         )

@@ -24,10 +24,12 @@ class PihuBrain:
     - Tool announcements
     """
 
-    def __init__(self):
+    def __init__(self, backend_mode: bool = False, user_id: str = "pihu_user"):
         from config import PERSONA
 
         self.persona = PERSONA
+        self.backend_mode = backend_mode
+        self.user_id = user_id
         self.scheduler = None
         self.stt = None
         self.tts = None
@@ -42,73 +44,145 @@ class PihuBrain:
         self._is_running = False
         self._interaction_count = 0
 
-        log.info("🧠 PihuBrain created | Persona: %s", self.persona["name"])
+        log.info("🧠 PihuBrain created | Persona: %s | Backend Mode: %s", self.persona["name"], self.backend_mode)
 
     def initialize(self):
         """Initialize all modules in correct order."""
         from scheduler import ComputeScheduler
-        from stt_engine import STTEngine
-        from tts_engine import TTSEngine
-        from audio_io import MicrophoneStream, AudioPlayer
         from memory_engine import MemoryEngine
         from intent_classifier import IntentClassifier
         from llm.llama_cpp_llm import LlamaCppLLM
         from llm.cloud_llm import CloudLLM
         from tools.web_search import WebSearch
-        from tools.vision import VisionTool
-        from tools.vision_grounding import VisionGrounding
-        from tools.automation import AutomationTool
-        from tools.pencil_swarm_agent import PencilSwarmAgent
-        from tools.mcp_dispatcher import MCPDispatcher
         from router import Router
         from streaming_pipeline import StreamingPipeline
+        from hardware_profiler import system_profiler
 
         log.info("🚀 Initializing all modules...")
         t0 = time.time()
+        
+        # 0. Hardware Profiler Assessment
+        hardware_profile = system_profiler.evaluate()
+        system_profiler.print_splash_screen()
 
         # 1. Scheduler (must be first — others depend on it)
         self.scheduler = ComputeScheduler()
 
-        # 2. Audio I/O
-        self.mic = MicrophoneStream()
-        self.player = AudioPlayer()
+        # 2. Audio I/O (Skip in Backend SaaS Mode)
+        if not self.backend_mode:
+            try:
+                from audio_io import MicrophoneStream, AudioPlayer
 
-        # 3. STT (preload)
-        self.stt = STTEngine(scheduler=self.scheduler)
-        self.stt.load()
+                self.mic = MicrophoneStream()
+                self.player = AudioPlayer()
+            except BaseException as e:
+                log.warning("Audio hardware failed to initialize: %s. Continuing in degraded mode.", e)
 
-        # 4. TTS (preload)
-        self.tts = TTSEngine()
-        self.tts.load()
+            # 3. STT (preload)
+            from stt_engine import STTEngine
 
-        # 5. Memory
-        self.memory = MemoryEngine()
+            self.stt = STTEngine(scheduler=self.scheduler)
+            self.stt.load()
 
-        # 6. Intent Classifier
+            # 4. TTS (preload)
+            from tts_engine import TTSEngine
+
+            self.tts = TTSEngine()
+            self.tts.load()
+        else:
+            log.info("☁️ Backend mode: skipping desktop audio, STT, and TTS initialization")
+
+        # 5. Intent Classifier
         self.intent_classifier = IntentClassifier()
 
-        # 7. LLMs (Native Direct Loading — No Ollama)
-        local_llm = LlamaCppLLM(scheduler=self.scheduler)
-        cloud_llm = CloudLLM()
+        from llm.local_llm import LocalLLM
+        # 7. LLMs (BYOM Provider Setup)
+        ollama_llm = LocalLLM(scheduler=self.scheduler)
+        ollama_health = ollama_llm.health_check()
+        ollama_model_found = ollama_health.get("available", False)
+        
+        native_llm = LlamaCppLLM(scheduler=self.scheduler)
+        native_llm.health_check()
 
-        # Check native model status
-        local_llm.check_models()
+        # Prioritize Ollama if the model is actually present, otherwise native CPU
+        if ollama_model_found:
+            active_local = ollama_llm
+            log.info("✅ Using Ollama LLM: %s", ollama_health.get("model_name"))
+        else:
+            active_local = native_llm
+            log.info("⚠️ Ollama model not found — falling back to native Phi-3.5 (llama-cpp)")
+
+        # 7.5 Apply Hardware Profiles to active local model
+        active_local.max_tokens = hardware_profile.max_context
+        if hasattr(active_local, "primary_model"):
+            active_local.primary_model = hardware_profile.recommended_model
+            active_local._current_model = hardware_profile.recommended_model
+            log.info("⚙️ Hardware Profiler: Bound Local LLM context to %s and model to %s", 
+                     active_local.max_tokens, active_local.primary_model)
+
+        cloud_llm = CloudLLM()
+        cloud_llm.health_check()
+        
+        # 8. Memory (Requires LLM for Background Compaction)
+        self.memory = MemoryEngine(user_id=self.user_id, backend_mode=self.backend_mode, llm_client=active_local)
 
         # 8. Tools
         web_search = WebSearch()
-        vision = VisionTool(scheduler=self.scheduler)
-        grounding = VisionGrounding(cloud_llm=cloud_llm)
-        automation = AutomationTool(llm_client=cloud_llm, grounding_tool=grounding)
-        swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=None)
-        mcp = MCPDispatcher()
+        voice_os = None
+        
+        if self.backend_mode:
+            # === SAAS MODE ===
+            vision = None
+            grounding = None
+            automation = None
+            swarm = None
+            mcp = None
+            openclaw = None
+        else:
+            # === NATIVE DESKTOP MODE ===
+            from tools.vision import VisionTool
+            from tools.vision_grounding import VisionGrounding
+            from tools.automation import AutomationTool
+            from tools.pencil_swarm_agent import PencilSwarmAgent
+            from tools.mcp_dispatcher import MCPDispatcher
 
-        # 8.5 OpenClaw Orchestrator
-        from openclaw_bridge import OpenClawBridge
-        openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=None)
+            if "VisionAnalysis" in hardware_profile.capabilities_disabled:
+                log.warning("⚙️ Hardware Profiler: Disabling VisionTool (RAM/VRAM limits)")
+                vision = None
+                grounding = None
+            else:
+                vision = VisionTool(scheduler=self.scheduler)
+                grounding = VisionGrounding(cloud_llm=cloud_llm)
+                
+            automation = AutomationTool(llm_client=cloud_llm, grounding_tool=grounding)
+
+            from tools.voice_os_control import VoiceOSController
+            voice_os = VoiceOSController(automation=automation)
+            
+            if "HeavySwarmConcurrency" in hardware_profile.capabilities_disabled:
+                log.warning("⚙️ Hardware Profiler: Disabling SwarmAgent (RAM/VRAM limits)")
+                swarm = None
+            else:
+                swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=None)
+                
+            mcp = MCPDispatcher()
+
+            # 8.5 OpenClaw Orchestrator
+            from openclaw_bridge import OpenClawBridge
+            openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=None)
+
+        # 8.7 Capability Negotiation
+        from capability_negotiator import CapabilityNegotiator
+        negotiator = CapabilityNegotiator(hardware_profile=hardware_profile)
+        if hasattr(active_local, "primary_model"):
+            negotiator.evaluate_model(active_local.primary_model, llm_client=active_local)
+        else:
+            negotiator.evaluate_model("unknown", llm_client=active_local)
 
         # 9. Router (Primary Engine is now LocalLLM)
         self.router = Router(
-            local_llm=local_llm,
+            capability_negotiator=negotiator,
+            local_llm=active_local,
             cloud_llm=cloud_llm,
             groq_llm=None,
             memory=self.memory,
@@ -116,29 +190,38 @@ class PihuBrain:
             web_search=web_search,
             vision=vision,
             automation=automation,
+            voice_os=voice_os,
             mcp=mcp,
             swarm=swarm,
             openclaw=openclaw,
+            backend_mode=self.backend_mode,
+            user_id=self.user_id,
         )
 
         # 10. Streaming Pipeline
-        self.pipeline = StreamingPipeline(
-            tts_engine=self.tts,
-            audio_player=self.player,
-        )
+        if not self.backend_mode:
+            self.pipeline = StreamingPipeline(
+                tts_engine=self.tts,
+                audio_player=self.player,
+            )
 
         elapsed = time.time() - t0
         log.info("✅ All modules initialized in %.1fs", elapsed)
 
     def run(self):
         """Main loop: listen → process → respond → repeat.
-        
+
         NEVER terminates on its own. Individual cycle failures are caught
         and logged, and the loop continues.
         """
+        from config import (
+            MAX_CONSECUTIVE_ERRORS,
+            ERROR_COOLDOWN_SECONDS,
+            ERROR_RETRY_DELAY,
+        )
+
         self._is_running = True
         consecutive_errors = 0
-        MAX_CONSECUTIVE_ERRORS = 20
 
         log.info("=" * 50)
         log.info("   🎤 Pihu is ready! Bolo kuch...")
@@ -161,25 +244,60 @@ class PihuBrain:
             while self._is_running:
                 try:
                     self._listen_and_respond()
-                    consecutive_errors = 0  # Reset on success
+                    consecutive_errors = 0 # Reset on success
                 except KeyboardInterrupt:
-                    raise  # Let the outer handler deal with it
-                except Exception as e:
+                    raise # Let the outer handler deal with it
+                except (IOError, OSError, RuntimeError) as e:
+                    # Specific hardware/IO errors
                     consecutive_errors += 1
                     log.error(
-                        "⚠️ Listen/respond cycle failed (error %d/%d): %s",
+                        "⚠️ Listen/respond IO/hardware cycle failed (error %d/%d): %s",
                         consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
                     )
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                         log.warning(
-                            "Too many consecutive errors — cooling down 10s"
+                            "Too many consecutive IO errors — cooling down %ds", ERROR_COOLDOWN_SECONDS
                         )
                         import time
-                        time.sleep(10)
+                        time.sleep(ERROR_COOLDOWN_SECONDS)
                         consecutive_errors = 0
                     else:
                         import time
-                        time.sleep(0.5)  # Brief pause before retry
+                        time.sleep(ERROR_RETRY_DELAY) # Brief pause before retry
+                except (ValueError, TypeError, AttributeError) as e:
+                    # Specific logic/data errors
+                    consecutive_errors += 1
+                    log.error(
+                        "⚠️ Listen/respond logic cycle failed (error %d/%d): %s",
+                        consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        log.warning(
+                            "Too many consecutive logic errors — cooling down %ds", ERROR_COOLDOWN_SECONDS
+                        )
+                        import time
+                        time.sleep(ERROR_COOLDOWN_SECONDS)
+                        consecutive_errors = 0
+                    else:
+                        import time
+                        time.sleep(ERROR_RETRY_DELAY) # Brief pause before retry
+                except Exception as e:
+                    # Catch-all for truly unexpected errors
+                    consecutive_errors += 1
+                    log.exception(
+                        "⚠️ Unexpected listen/respond cycle failed (error %d/%d): %s",
+                        consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        log.warning(
+                            "Too many consecutive unexpected errors — cooling down %ds", ERROR_COOLDOWN_SECONDS
+                        )
+                        import time
+                        time.sleep(ERROR_COOLDOWN_SECONDS)
+                        consecutive_errors = 0
+                    else:
+                        import time
+                        time.sleep(ERROR_RETRY_DELAY) # Brief pause before retry
         except KeyboardInterrupt:
             log.info("Keyboard interrupt — shutting down")
         finally:
@@ -221,6 +339,8 @@ class PihuBrain:
                     continue  # Don't break — keep the loop alive
 
                 try:
+                    # Inplace thinking status
+                    print("\r🤖 Pihu: Thinking...", end="", flush=True)
                     self._process_text(user_input)
                     consecutive_errors = 0
                 except Exception as e:
@@ -284,6 +404,8 @@ class PihuBrain:
             if self.memory:
                 if hasattr(self.memory, "update_memory_async"):
                     self.memory.update_memory_async(f"User: {text}")
+                if hasattr(self.memory, "update_dialogue"):
+                    self.memory.update_dialogue("user", text)
         except Exception as e:
             log.error("Memory store failed: %s", e)
 
@@ -311,6 +433,13 @@ class PihuBrain:
         try:
             if self.router:
                 route_result = self.router.route(intent)
+                
+                # Startup Resiliency: If first message and it failed, retry once after a short wait
+                if (route_result is None or route_result.response is None) and self._interaction_count <= 1:
+                    log.info("🕒 Startup lag detected — Retrying routing in 3s...")
+                    import time
+                    time.sleep(3)
+                    route_result = self.router.route(intent)
             else:
                 # Degraded mode: just echo
                 route_result = None
@@ -321,7 +450,12 @@ class PihuBrain:
         # 3. Stream response
         try:
             if route_result is not None and route_result.response is not None:
-                if self.pipeline:
+                if self.pipeline and self.tts and self.tts.is_loaded:
+                    full_response = self.pipeline.stream_response(
+                        token_generator=route_result.response,
+                        tool_announcement=route_result.tool_announcement,
+                    )
+                elif self.pipeline:
                     full_response = self.pipeline.stream_text_only(
                         token_generator=route_result.response,
                         tool_announcement=route_result.tool_announcement,
@@ -329,7 +463,7 @@ class PihuBrain:
                 else:
                     # No pipeline — consume generator manually
                     tokens = []
-                    print("\n🤖 Pihu: ", end="", flush=True)
+                    print("\r" + " " * 100 + "\r🤖 Pihu: ", end="", flush=True)
                     for token in route_result.response:
                         print(token, end="", flush=True)
                         tokens.append(token)
@@ -337,13 +471,15 @@ class PihuBrain:
                     full_response = "".join(tokens)
             else:
                 full_response = "Hmm, kuch samajh nahi aaya. Please phir se bolo?"
-                print(f"\n🤖 Pihu: {full_response}")
+                print(f"\r🤖 Pihu: {full_response}")
 
             # Store response in memory
             try:
                 if self.memory:
                     if hasattr(self.memory, "update_memory_async"):
                         self.memory.update_memory_async(f"Assistant: {full_response}")
+                    if hasattr(self.memory, "update_dialogue"):
+                        self.memory.update_dialogue("assistant", full_response)
             except Exception as e:
                 log.error("Memory store (response) failed: %s", e)
 

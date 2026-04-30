@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  # The Relational Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: pihu_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: pihu_saas
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pihu_user -d pihu_saas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # In-Memory Message Broker & Rate Limiting
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # The FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app # Hot-reload mounts
+    environment:
+      - PIHU_ENV=${PIHU_ENV:-production}
+      - PIHU_DEMO_MODE=0
+      - DATABASE_URL=postgresql+asyncpg://pihu_user:${POSTGRES_PASSWORD}@postgres:5432/pihu_saas
+      - SYNC_DATABASE_URL=postgresql://pihu_user:${POSTGRES_PASSWORD}@postgres:5432/pihu_saas
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - NVIDIA_NIM_API_KEY=${NVIDIA_NIM_API_KEY:?set NVIDIA_NIM_API_KEY}
+      - E2B_API_KEY=${E2B_API_KEY:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+      - PIHU_ADMIN_EMAIL=${PIHU_ADMIN_EMAIL:?set PIHU_ADMIN_EMAIL}
+      - PIHU_ADMIN_PASSWORD_SHA256=${PIHU_ADMIN_PASSWORD_SHA256:?set PIHU_ADMIN_PASSWORD_SHA256}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+
+  # Async Distributed Worker (Celery)
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    volumes:
+      - .:/app
+    environment:
+      - PIHU_ENV=${PIHU_ENV:-production}
+      - PIHU_DEMO_MODE=0
+      - DATABASE_URL=postgresql+asyncpg://pihu_user:${POSTGRES_PASSWORD}@postgres:5432/pihu_saas
+      - SYNC_DATABASE_URL=postgresql://pihu_user:${POSTGRES_PASSWORD}@postgres:5432/pihu_saas
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - NVIDIA_NIM_API_KEY=${NVIDIA_NIM_API_KEY:?set NVIDIA_NIM_API_KEY}
+      - E2B_API_KEY=${E2B_API_KEY:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+      - PIHU_ADMIN_EMAIL=${PIHU_ADMIN_EMAIL:?set PIHU_ADMIN_EMAIL}
+      - PIHU_ADMIN_PASSWORD_SHA256=${PIHU_ADMIN_PASSWORD_SHA256:?set PIHU_ADMIN_PASSWORD_SHA256}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: celery -A api.worker.celery_app worker --loglevel=info --concurrency=4
+
+  # Metrics Ingestion (Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+
+  # Visualization Dashboard (Grafana)
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+    depends_on:
+      - prometheus
+
+  # The React Frontend Web Server
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_ENABLE_DEMO_MODE: ${VITE_ENABLE_DEMO_MODE:-0}
+    ports:
+      - "5173:80" # Mapping Vite's default dev port to Nginx container port 80 for ease of typing
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

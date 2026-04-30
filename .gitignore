@@ -29,9 +29,24 @@ venv/
 # Third Party
 third_party/taskweaver/project/temp/
 third_party/taskweaver/project/logs/
+third_party/TTS/
+third_party/TTS_master.zip
+*.zip
 node_modules/
+package-lock.json
+
+# Large Data Files
+*.csv
+
+# Generated / Cache
+.opencode/
+.pytest_cache/
 
 # Media / Artifacts
 assets/
 Gemini_Generated_Image_*.png
 grid_preview.jpg
+models/
+*.gguf
+.pihu/
+.sixth/

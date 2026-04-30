@@ -1,49 +1,62 @@
 """
-Pihu V2 — Real-time Voice Sandbox
-Validates that the RealtimeTTS + Kokoro engine can stream audio
-directly from a simulated token generator with sub-200ms latency.
+Pihu — Voice Test
+Validates that the configured TTS backend can synthesize clear
+Hindi/Hinglish-style companion speech.
 """
 from tts_engine import TTSEngine
 import time
 
+
 def simulate_tokens():
-    """Simulate a slow LLM generating text."""
-    text = "Hello. This is Pihu v2 testing the new real-time voice engine. I should start speaking before I finish thinking this whole sentence."
-    # We yield word by word with a tiny delay
+    """Simulate a slow LLM generating Hinglish text."""
+    text = "Hi Piyush. Main Pihu hoon, tumhari sweet si girlfriend. Bolo, aaj kya karna hai?"
     for word in text.split():
         yield word + " "
-        time.sleep(0.05) # 50ms per word = fast LLM
+        time.sleep(0.05)  # 50ms per word
+
 
 def run_voice_test():
-    print("========== V2 VOICE BOOT SEQUENCE ==========")
+    print("=" * 50)
+    print("  Pihu — Voice Test")
+    print("=" * 50)
+
     tts = TTSEngine()
     tts.load()
-    
+
     if not tts.is_loaded:
-        print("[CRITICAL ERROR] RealtimeTTS failed to load.")
+        print("[CRITICAL ERROR] TTS failed to load.")
+        print("On Windows, check SAPI voices. For Indic-TTS, run `python scripts/setup_indic_tts.py`.")
         return
-        
-    print("\n>>> Starting Real-time Stream...")
+
+    print(f">>> Loaded TTS backend: {tts.backend}")
+
+    # --- Test 1: feed/play API (simulated streaming) ---
+    print("\n>>> Test 1: Streaming feed/play API")
     start_time = time.time()
-    
-    # 1. Start the playback loop
-    tts.play(async_mode=True)
-    
-    # 2. Feed the simulated token generator
-    first_chunk_time = None
+
     for chunk in simulate_tokens():
-        if first_chunk_time is None:
-            first_chunk_time = time.time()
-            print(f"Feeding first word at: {first_chunk_time - start_time:.4f}s")
         tts.feed(chunk)
         print(chunk, end="", flush=True)
 
-    print("\n\n>>> Feed complete. Waiting for audio to finish...")
-    # RealtimeTTS handles the wait in its internal thread, but we'll sleep for a bit
-    time.sleep(5) 
-    
+    print("\n\n>>> Feed complete. Playing synthesized audio...")
+    tts.play(async_mode=False)  # Synchronous so we hear it
+
+    elapsed = time.time() - start_time
+    print(f">>> Test 1 done in {elapsed:.1f}s")
+
+    time.sleep(0.5)
+
+    # --- Test 2: one-shot synthesize ---
+    print("\n>>> Test 2: One-shot synthesize()")
+    t0 = time.time()
+    tts.synthesize("Pihu ready hai. Bolo jaan, kya karna hai?")
+    print(f">>> Test 2 done in {time.time() - t0:.1f}s")
+
     tts.stop()
-    print("\n========== V2 VOICE TEST COMPLETE ==========")
+    print("\n" + "=" * 50)
+    print("  Voice Test Complete")
+    print("=" * 50)
+
 
 if __name__ == "__main__":
     run_voice_test()

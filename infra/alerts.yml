@@ -1,0 +1,88 @@
+# ──────────────────────────────────────────────────────────
+# Pihu SaaS — Prometheus Alerting Rules
+# Maps to SLO definitions in api/observability.py
+# ──────────────────────────────────────────────────────────
+
+groups:
+  - name: pihu_slo_alerts
+    rules:
+      # ── Latency ──
+      - alert: PihuChatHighLatency
+        expr: histogram_quantile(0.95, rate(pihu_request_duration_seconds_bucket{endpoint="/api/v1/chat"}[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          slo: chat_latency_p95
+        annotations:
+          summary: "Chat p95 latency exceeds 2s SLO"
+          description: "Chat endpoint p95 latency is {{ $value }}s (target: 2.0s)"
+
+      - alert: PihuPredictionHighLatency
+        expr: histogram_quantile(0.95, rate(pihu_request_duration_seconds_bucket{endpoint="/api/v1/predict"}[5m])) > 5.0
+        for: 5m
+        labels:
+          severity: warning
+          slo: prediction_latency_p95
+        annotations:
+          summary: "Prediction p95 latency exceeds 5s SLO"
+          description: "Prediction endpoint p95 latency is {{ $value }}s (target: 5.0s)"
+
+      # ── Error Rate ──
+      - alert: PihuHighErrorRate
+        expr: rate(pihu_requests_total{status=~"5.."}[5m]) / rate(pihu_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          slo: error_rate
+        annotations:
+          summary: "5xx error rate exceeds 5% for 5 minutes"
+          description: "Error rate is {{ $value | humanizePercentage }} (budget: 1%)"
+
+      - alert: PihuErrorBudgetBurning
+        expr: pihu_error_budget_remaining_ratio < 0.2
+        for: 10m
+        labels:
+          severity: critical
+          slo: availability
+        annotations:
+          summary: "Error budget below 20% — SLO at risk"
+          description: "Remaining error budget: {{ $value | humanizePercentage }}"
+
+      # ── Queue Health ──
+      - alert: PihuQueueBacklog
+        expr: pihu_celery_queue_depth{queue_name="pihu_tasks"} > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery task queue depth exceeds 100"
+          description: "Queue depth: {{ $value }} tasks pending"
+
+      # ── Infrastructure ──
+      - alert: PihuCircuitBreakerOpen
+        expr: pihu_circuit_breaker_state > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker '{{ $labels.circuit_name }}' is OPEN"
+          description: "Service '{{ $labels.circuit_name }}' has tripped the circuit breaker"
+
+      # ── Billing ──
+      - alert: PihuTenantQuotaWarning
+        expr: pihu_tokens_consumed_total / on(tenant_id) group_left pihu_tenant_token_limit > 0.9
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} at >90% token quota"
+
+      # ── Host Resources ──
+      - alert: PihuHighMemoryUsage
+        expr: process_resident_memory_bytes / 1024 / 1024 > 2048
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend process using >2GB RAM"
+          description: "Current RSS: {{ $value }}MB"

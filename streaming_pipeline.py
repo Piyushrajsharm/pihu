@@ -62,20 +62,22 @@ class StreamingPipeline:
             Full response text
         """
         self._full_response = []
-        
-        if self.tts and self.tts.is_loaded:
-            # Start the RealtimeTTS playback loop (async)
-            self.tts.play(async_mode=True)
-            
-            if tool_announcement:
-                self.tts.feed(tool_announcement + " ")
 
-        # Feed tokens as they arrive
+        if self.tts and self.tts.is_loaded and tool_announcement:
+            self.tts.feed(tool_announcement + " ")
+
+        print("\r" + " " * 100 + "\r🤖 Pihu: ", end="", flush=True)
+
+        # Collect tokens as they arrive (print in real-time)
         try:
             for token in token_generator:
                 self._full_response.append(token)
                 if self.tts and self.tts.is_loaded:
                     self.tts.feed(token)
+                    
+                    # Trigger synthesis/playback if a sentence ends
+                    if any(p in token for p in self.flush_punctuation):
+                        self.tts.play(async_mode=True)
                 
                 # Still print to console for visual feedback
                 print(token, end="", flush=True)
@@ -84,7 +86,11 @@ class StreamingPipeline:
             log.error("Pipeline feed error: %s", e)
         finally:
             print() # Newline after response
-            
+        
+        # Flush buffered text through Indic-TTS (sentence-level synthesis + playback)
+        if self.tts and self.tts.is_loaded:
+            self.tts.play(async_mode=True)
+
         return "".join(self._full_response)
 
     def stream_text_only(
@@ -102,12 +108,23 @@ class StreamingPipeline:
         self._full_response = []
 
         if tool_announcement:
-            print(f"\n🔧 {tool_announcement}")
+            print(f"\r🔧 {tool_announcement}")
 
-        print("\n🤖 Pihu: ", end="", flush=True)
+        print("\r" + " " * 100 + "\r🤖 Pihu: ", end="", flush=True)
 
+        consecutive_newlines = 0
         try:
             for token in token_generator:
+                if "\n" in token:
+                    consecutive_newlines += token.count("\n")
+                else:
+                    consecutive_newlines = 0
+                
+                # Safety: Stop if model starts spamming newlines
+                if consecutive_newlines > 3:
+                    log.warning("🚫 Newline spam detected — suppressing stream")
+                    break
+                    
                 print(token, end="", flush=True)
                 self._full_response.append(token)
         except Exception as e:

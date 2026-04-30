@@ -19,10 +19,11 @@ class TelemetryCore:
         
     def log_event(self, event_type: str, detail: str = ""):
         """Appends a JSONL string representing an architectural interaction boundary."""
+        from config import MAX_TELEMETRY_DETAIL_LENGTH
         payload = {
             "timestamp": time.time(),
-            "event": event_type,  # "SUCCESS", "SURRENDER", "CONTEXT_MISS", "MACRO_PROPOSED"
-            "detail": detail[:100] # Truncated to prevent VRAM destruction during weekly review
+            "event": event_type, # "SUCCESS", "SURRENDER", "CONTEXT_MISS", "MACRO_PROPOSED"
+            "detail": detail[:MAX_TELEMETRY_DETAIL_LENGTH] # Truncated to prevent VRAM destruction during weekly review
         }
         
         try:

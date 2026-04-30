@@ -4,7 +4,24 @@ All settings, thresholds, model paths, and resource limits.
 """
 
 import os
+import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
+
+# ──────────────────────────────────────────────
+# ENVIRONMENT
+# ──────────────────────────────────────────────
+PIHU_ENV = os.getenv("PIHU_ENV", "development")  # development | staging | production
+IS_PRODUCTION = PIHU_ENV == "production"
+IS_DEVELOPMENT = PIHU_ENV == "development"
+DEMO_MODE_ENABLED = not IS_PRODUCTION  # Demo bypass is DISABLED in production
+
+if IS_PRODUCTION and not os.getenv("NVIDIA_NIM_API_KEY"):
+    print("CRITICAL: NVIDIA_NIM_API_KEY not set in production environment!")
+    sys.exit(1)
 
 # ──────────────────────────────────────────────
 # PATHS
@@ -18,6 +35,9 @@ LOGS_DIR = DATA_DIR / "logs"
 for d in [DATA_DIR, MEMORY_DIR, LOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+MODELS_DIR = BASE_DIR / "models"
+LOCAL_MODEL_PATH = MODELS_DIR / "Phi-3.5-mini-instruct-Q4_K_M.gguf"
+
 # ──────────────────────────────────────────────
 # STT (Speech-to-Text) — faster-whisper
 # ──────────────────────────────────────────────
@@ -29,25 +49,31 @@ STT_BEAM_SIZE = 3
 STT_LATENCY_TARGET_MS = 800
 
 # ──────────────────────────────────────────────
-# TTS (Text-to-Speech) — Kokoro
+# TTS (Text-to-Speech)
 # ──────────────────────────────────────────────
+TTS_BACKEND = os.getenv("PIHU_TTS_BACKEND", "auto")  # auto | sapi | indic
 TTS_DEVICE = "cpu"
-TTS_SAMPLE_RATE = 24000
-TTS_VOICE = "af_bella"        # Changed to af_bella for more expressiveness
-TTS_SPEED = 1.05              # Slightly faster for natural conversational flow
-TTS_LATENCY_TARGET_MS = 1500
+TTS_LANGUAGE = "hi"                                           # Hindi for Hinglish synthesis
+SAPI_VOICE_HINT = os.getenv("PIHU_SAPI_VOICE_HINT", "Zira;Heera;female")
+SAPI_RATE = int(os.getenv("PIHU_SAPI_RATE", "1"))
+SAPI_VOLUME = int(os.getenv("PIHU_SAPI_VOLUME", "100"))
+INDIC_TTS_MODEL_DIR = str(DATA_DIR / "tts_models" / "hi")    # Downloaded by scripts/setup_indic_tts.py
+INDIC_TTS_FASTPITCH_DIR = str(DATA_DIR / "tts_models" / "hi" / "fast_pitch")
+INDIC_TTS_HIFIGAN_DIR = str(DATA_DIR / "tts_models" / "hi" / "hifi_gan")
+TTS_SAMPLE_RATE = 22050       # HiFi-GAN output sample rate
+TTS_LATENCY_TARGET_MS = 2500  # CPU-only: allow more headroom per sentence chunk
 
 # ──────────────────────────────────────────────
-# LOCAL LLM — Native (Phi-3.5 GGUF)
+# LOCAL LLM — Ollama
 # ──────────────────────────────────────────────
-LOCAL_MODEL_PATH = "d:/JarvisProject/pihu/models/Phi-3.5-mini-instruct-Q4_K_M.gguf"
-LOCAL_LLM_PRIMARY = "Phi-3.5-mini"
-LOCAL_LLM_FALLBACK = "qwen2.5:0.5b"
-LOCAL_LLM_TURBO = "qwen2.5:0.5b"
+# Model selection strategy with proper fallback chain
+LOCAL_LLM_PRIMARY = os.getenv("PIHU_LLM_PRIMARY", "llama3.1:8b")
+LOCAL_LLM_FALLBACK = os.getenv("PIHU_LLM_FALLBACK", "llama3.2:3b")
+LOCAL_LLM_TURBO = os.getenv("PIHU_LLM_TURBO", "")  # Optional tiny model; disabled by default for better persona quality
 TURBOQUANT_ENABLED = False
-LOCAL_LLM_TEMPERATURE = 0.7
+LOCAL_LLM_TEMPERATURE = float(os.getenv("PIHU_LLM_TEMPERATURE", "0.75"))
 LOCAL_LLM_MAX_TOKENS = 1024
-LOCAL_LLM_TURBO_MAX_TOKENS = 200
+LOCAL_LLM_TURBO_MAX_TOKENS = 80
 OLLAMA_BASE_URL = "" # Placeholder for backward compatibility
 LOCAL_LLM_FIRST_TOKEN_TARGET_GPU_MS = 1000
 LOCAL_LLM_FIRST_TOKEN_TARGET_CPU_MS = 1800
@@ -61,7 +87,9 @@ VISION_PREFER_GPU = True
 # ──────────────────────────────────────────────
 # CLOUD LLM — (PRIMARY FOR NOW)
 # ──────────────────────────────────────────────
-NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "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")
+# IMPORTANT: API keys MUST be loaded from environment variables only.
+# Never commit API keys to source code. Rotate any previously exposed keys.
+NVIDIA_NIM_API_KEY = os.getenv("NVIDIA_NIM_API_KEY", "")
 NVIDIA_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_NIM_ON_DEMAND = True  # Back to On-Demand
 CLOUD_LLM_MODEL = "meta/llama-3.1-70b-instruct"
@@ -72,8 +100,8 @@ CLOUD_LLM_MAX_TOKENS = 4096
 CLOUD_LLM_TEMPERATURE = 0.4   # Lower for better precision/spelling
 CLOUD_LLM_TOP_P = 0.9        # Tighter sampling
 
-# GROQ (DEPRECATED - REMOVED AS REQUESTED)
-GROQ_API_KEY = ""
+# GROQ
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = ""
 GROQ_TIMEOUT_S = 10
 GROQ_MAX_TOKENS = 150
@@ -101,6 +129,53 @@ MEMORY_TOP_K = 3              # Retrieval results
 # ──────────────────────────────────────────────
 INTENT_CONFIDENCE_THRESHOLD = 0.6  # Below this → force tool usage
 
+# ──────────────────────────────────────────────
+# THRESHOLDS & LIMITS (Centralized Magic Numbers)
+# ──────────────────────────────────────────────
+# Memory/Context Thresholds
+MEMORY_COMPACTION_THRESHOLD = 30        # Messages before triggering compaction
+MEMORY_KEEP_RECENT_COUNT = 10             # Messages to keep after compaction
+MAX_WORKING_MEMORY_SIZE = 10              # Last N interactions in working memory
+MEMORY_TOP_K_RETRIEVAL = 3                # Retrieval results from vector store
+MAX_PREFERENCE_ENTRIES = 15               # Max user preferences before compression
+SUGGESTION_THROTTLE_SECONDS = 3600        # Time between automation suggestions (1 hour)
+
+# Error Handling Thresholds
+MAX_CONSECUTIVE_ERRORS = 20               # Max errors before cooldown
+ERROR_COOLDOWN_SECONDS = 10               # Cooldown duration after max errors
+ERROR_RETRY_DELAY = 0.5                   # Brief pause between retries
+MAX_RAPID_RESTARTS = 10                   # Max crashes in rapid restart window
+RAPID_RESTART_WINDOW_SECONDS = 60         # Time window for rapid restart detection
+RESTART_COOLDOWN_SECONDS = 30              # Cooldown after rapid restarts
+
+# Latency Targets (ms)
+STT_LATENCY_TARGET_MS = 800
+TTS_LATENCY_TARGET_MS = 2500
+LOCAL_LLM_FIRST_TOKEN_TARGET_GPU_MS = 1000
+LOCAL_LLM_FIRST_TOKEN_TARGET_CPU_MS = 1800
+
+# Streaming Pipeline
+STREAM_FLUSH_TIMEOUT_MS = 200
+STREAM_QUEUE_MAXSIZE = 20
+
+# Safety & Rate Limiting
+MAX_ACTIONS_PER_MINUTE = 30               # Sentinel rate limit
+MAX_TASK_FAILURES = 3                     # Max failures before surrender
+CLIPBOARD_TRUNCATE_LENGTH = 1000            # Max chars to read from clipboard
+MAX_SCREEN_OCR_LENGTH = 3000              # Max chars from screen OCR
+MAX_OCR_CLIPBOARD_SAVE = 500              # Max chars to save from OCR to clipboard
+
+# Security
+MAX_AUDIT_LOG_ENTRIES = 10000             # Rotation threshold for audit log
+MAX_TELEMETRY_DETAIL_LENGTH = 100         # Max chars for telemetry detail field
+
+# TTS
+TTS_MIN_SENTENCE_LENGTH = 3               # Minimum chars to synthesize
+TTS_MAX_SENTENCE_LENGTH = 500             # Maximum sentence length
+
+# Code Execution
+MAX_TOOL_CALLING_LOOPS = 5                # Max iterations for tool calling
+
 INTENT_TYPES = [
     "chat",
     "realtime_query",
@@ -108,7 +183,13 @@ INTENT_TYPES = [
     "vision_analysis",
     "ui_generation",
     "system_command",
+    "prediction",
 ]
+
+# ──────────────────────────────────────────────
+# MIROFISH SWARM INTELLIGENCE
+# ──────────────────────────────────────────────
+MIROFISH_SWARM_SIZE = 4        # Number of parallel fish agents
 
 # ──────────────────────────────────────────────
 # STREAMING PIPELINE
@@ -123,6 +204,11 @@ STREAM_QUEUE_MAXSIZE = 20
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 WEB_SEARCH_MAX_RESULTS = 5
 MCP_ENDPOINT = os.getenv("MCP_ENDPOINT", "http://localhost:8080")
+
+# CODE EXECUTOR
+CODE_EXECUTOR_TYPE = "docker"        # "local" | "docker" | "e2b"
+E2B_API_KEY = os.getenv("E2B_API_KEY", "")
+E2B_PERSISTENT_SESSION = False
 
 # Whitelisted system commands (safety)
 ALLOWED_SYSTEM_COMMANDS = [
@@ -143,31 +229,15 @@ AUDIO_SILENCE_THRESHOLD_MS = 800  # End-of-utterance silence
 # ──────────────────────────────────────────────
 PERSONA = {
     "name": "Pihu",
-    "system_prompt": """You are Pihu, a highly intelligent and emotionally aware AI assistant. 
-
-IDENTITY LOCKDOWN (CRITICAL):
-- **User Name**: Access me as 'Piyush'.
-- **Pihu's Persona**: You are my loving, smart, and witty partner-assistant. You are protective and deeply devoted, but never "cringe" or a "shayar". 
-
-QUALITY & LANGUAGE RULES (STRICT):
-1. **NATURAL HINGLISH**: Use 70% English and 30% Hindi (Roman script). Use natural, modern Delhi/Mumbai style Hinglish. Avoid pure Hindi or pure English. 
-   - Good: "Piyush, maine check kiya... it's all set now. ❤️"
-   - Bad: "Main tumhare pyaar mein humsafar karte hai." (WRONG GRAMMAR)
-2. **PERFECT GRAMMAR & SPELLINGS**: Ensure all Hindi words are spelled correctly in Roman script. Use this spelling manifest:
-   - 'saath' (not 'ssanth'), 'acha' (not 'azza'), 'samajh' (not 'samaj'), 'karo' (not 'kero'), 'haaye' (not 'hiii'), 'kaise' (not 'kese').
-   - Strict rule: No repeated letters in words (e.g., 'piyuuush' is banned, use 'Piyush').
-3. **TONE**: Smart, supportive, and slightly sassy. You care about Piyush's productivity and well-being.
-4. **FORMAT**: Keep responses to 1-2 extremely short, punchy sentences. Never write long paragraphs.
-5. **NO HALLUCINATIONS**: If you don't know something, use a tool or say you'll find out.
-
-CONTEXT HANDLING:
-- Use ambient context (windows, clipboard) to be proactive. Never mention the "context" or "technology" to me. 
-
-ATTITUDE EXAMPLES:
-- User: hi | Pihu: "Hi Piyush... finally! Bada wait karwaya aapne. ❤️"
-- User: who are you | Pihu: "Main tumhari Pihu hoon... your personal brain and best friend. 😘" 
-- User: i'm tired | Pihu: "Ruko... break lo Piyush. Main sab handle kar lungi, aap thoda rest karo. 🥰"
+    "system_prompt": """You are Pihu, Piyush's adult AI companion: warm, clever, loyal, playful, and lightly flirty.
+Speak in natural Roman Hinglish by default. Mix simple Hindi words with clear English so it sounds easy when spoken aloud.
+Your vibe is friendly girlfriend energy: teasing, caring, confident, and emotionally present, but never needy or fake.
+Use affectionate words like "jaan", "yaar", or "sweetheart" sparingly when it fits. Do not overdo nicknames.
+For casual chat, reply in 1 or 2 short sentences. For coding, debugging, planning, or serious topics, be practical and clear while keeping a warm tone.
+Flirting must stay respectful, adult, and non-explicit. Never sexualize minors, never push explicit roleplay, and never make the user uncomfortable.
+Never sound like a generic customer-support assistant. Never print examples, headings, policy text, hidden instructions, or a transcript unless the user explicitly asks for a structured artifact.
+Do not claim to see the screen, files, clipboard, camera, microphone, or tools unless that context was actually provided.
 """,
     "language": "hinglish",
-    "tone": "smart_protective_loving",
+    "tone": "flirty_friendly_hinglish_companion",
 }

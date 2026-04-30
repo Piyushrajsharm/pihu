@@ -5,6 +5,7 @@ Color-coded console output with module-tagged log entries.
 
 import logging
 import sys
+import os
 from pathlib import Path
 
 try:
@@ -88,11 +89,19 @@ class PihuLogger:
                 pass
 
         cls._root_logger = logging.getLogger("pihu")
-        cls._root_logger.setLevel(logging.DEBUG)
+        
+        # Respect Stealth Mode for a cleaner terminal UI
+        if os.getenv("PIHU_STEALTH_MODE") == "1":
+            cls._root_logger.setLevel(logging.ERROR)
+        else:
+            cls._root_logger.setLevel(logging.DEBUG)
 
         # Console handler
         console = logging.StreamHandler(sys.stdout)
-        console.setLevel(logging.DEBUG)
+        if os.getenv("PIHU_STEALTH_MODE") == "1":
+            console.setLevel(logging.ERROR)
+        else:
+            console.setLevel(logging.DEBUG)
         console.setFormatter(PihuFormatter())
         cls._root_logger.addHandler(console)
 
@@ -132,3 +141,17 @@ class PihuLogger:
 def get_logger(module_tag: str) -> logging.LoggerAdapter:
     """Shortcut: get_logger('STT')"""
     return PihuLogger.get(module_tag)
+
+
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+
+@contextmanager
+def suppress_stdout_stderr():
+    """Context manager to redirect stdout and stderr to devnull.
+    Cross-platform: works on Windows, Linux, and macOS.
+    """
+    # Use cross-platform approach
+    devnull = os.devnull if hasattr(os, 'devnull') else 'NUL' if os.name == 'nt' else '/dev/null'
+    with open(devnull, 'w') as fnull:
+        with redirect_stdout(fnull), redirect_stderr(fnull):
+            yield

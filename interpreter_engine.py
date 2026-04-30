@@ -1,66 +1,104 @@
 """
-Pihu V2 — Interpreter Engine (The Hands)
-Replaces raw OS commands with OpenInterpreter's Sandboxed Python execution loop.
-Filters output traces dynamically so Voice models exclusively speak organic text.
+Pihu V2 — Interpreter Engine (The Safe Sandbox)
+Replaces un-sandboxed OpenInterpreter with a secure Docker-bound REPL execution loop.
 """
 from logger import get_logger
-import os
+import re
 
 log = get_logger("INTERPRETER")
 
 class InterpreterEngine:
-    def __init__(self):
-        try:
-            from interpreter import interpreter
-            
-            # --- V2 Architecture Constraints: 100% Offline via Ollama ---
-            interpreter.offline = True
-            interpreter.llm.model = "ollama/qwen2.5:3b"
-            interpreter.llm.api_base = "http://localhost:11434"
-            interpreter.auto_run = True # Pihu is autonomous. Force bypass of [y/n] confirms.
-            interpreter.llm.temperature = 0.0
-            
-            # Persona consistency: inject epistemic humility into the base interpreter logic
-            interpreter.system_message += """\nUnderstand you are executing as Pihu's underlying engine. Keep your conversational output in extremely concise Hinglish, exactly 1-2 sentences. If your code fails 3 times, gracefully surrender by stopping execution."""
+    def __init__(self, llm_client=None):
+        self.llm_client = llm_client
+        self.sandbox = None
+        self.is_available = False
 
-            self.interpreter = interpreter
-            self.is_available = True
-            log.info("💻 V2 Hands: OpenInterpreter Sandboxed Engine Initialized.")
-        except ImportError:
-            log.warning("OpenInterpreter missing. Falling back to legacy OpenClaw. Run `pip install open-interpreter`")
-            self.is_available = False
-            self.interpreter = None
+        try:
+            from sandbox.docker_executor import DockerExecutor
+            self.sandbox = DockerExecutor(profile_name="python_sandbox")
+            if self.sandbox.is_available:
+                self.is_available = True
+                log.info("💻 Secure Docker Sandbox Engine Initialized.")
+            else:
+                log.warning("Docker Sandbox failed to start. Docker SDK missing or daemon dead.")
+        except Exception as e:
+            log.error("Failed to initialize Docker Sandbox: %s", e)
+
+    def _extract_python_code(self, llm_output: str) -> str:
+        """Extracts code block from standard markdown triple backticks."""
+        pattern = re.compile(r"```(?:python)?\n(.*?)\n```", re.DOTALL)
+        match = pattern.search(llm_output)
+        if match:
+            return match.group(1).strip()
+        
+        # Fallback if no backticks but looks like raw code
+        if "print(" in llm_output or "import " in llm_output:
+            return llm_output.strip()
+            
+        return ""
 
     def execute_stream(self, prompt: str):
         """
-        Executes an OS prompt autonomously through OpenInterpreter's self-correcting logic loop.
-        Generator Stream Filter: Intercepts `type: code` so Kokoro TTS only reads human-readable intent.
+        Executes an OS prompt securely by converting to Python and running via Docker.
+        Yields human-readable updates.
         """
         if not self.is_available:
-            yield "Yahan execution environment available nahi hai. Installer check karna padega."
+            yield "Mera Docker sandbox load nahi hua hai. Python code nahi chala sakti command line se."
             return
 
-        try:
-            yield "Okay ruko, script chalati hoon... "
-            
-            # Stream=True yields chunks:
-            # {'role': 'assistant', 'type': 'message', 'content': 'I will do X'}
-            # {'role': 'assistant', 'type': 'code', 'format': 'python', 'content': 'print()'}
-            generator = self.interpreter.chat(prompt, stream=True, display=False)
-            
-            for chunk in generator:
-                if isinstance(chunk, dict):
-                    # Only yield pure conversational output
-                    if chunk.get("type") == "message" and "content" in chunk:
-                        text = chunk["content"]
-                        # Strip terminal-style markdown just in case
-                        if "`" not in text: 
-                            yield text
+        if not self.llm_client:
+            yield "Mujhe koi model nahi assign kiya gaya code likhne ke liye."
+            return
 
-                    # Logging internal code for telemetry but excluding from Voice stream
-                    elif chunk.get("type") == "code" and "content" in chunk:
-                        log.debug(f"[Interpreter Code]: {chunk['content'][:50]}...")
-                        
+        yield "Okay, main code likh ke sandbox mein run karti hoon. Ruko...\n"
+        
+        sys_prompt = (
+            "You are Pihu, an AI executing code. You must write a Python 3.10 script to fulfill the user's prompt. "
+            "Important logic constraints: "
+            "1. You are running inside a containerized Linux Docker environment, NOT the host OS. "
+            "2. Access is restricted exclusively to /workspace. "
+            "3. You do not have network access. "
+            "Return ONLY the raw python code wrapped in standard ```python ``` markdown. Do not provide explanations."
+        )
+
+        try:
+            # 1. Ask LLM to generate the script
+            # Use batch because we only want the final code block
+            log.info("Generating sandbox script...")
+            response = self.llm_client.generate(prompt=prompt, system_prompt=sys_prompt, stream=False)
+            
+            if not response:
+                yield "Code generate karne mein LLM timeout ho gaya."
+                return
+
+            code = self._extract_python_code(response)
+            if not code:
+                yield "Main code samajh nahi paayi ya generate nahi hua theek se."
+                return
+
+            log.debug("Extracted Sandbox Code:\n%s", code)
+            
+            # 2. Run inside Docker Sandbox
+            stdout, stderr, exit_code = self.sandbox.run_code(code)
+            
+            # 3. Analyze and Yield Results
+            if exit_code == 0:
+                log.info("Sandbox Execution successful.")
+                result_msg = stdout if stdout else "Code executed silently without printing anything."
+                
+                # We do a quick LLM pass to summarize the output organically
+                summary_prompt = f"The code executed successfully. Output:\n{result_msg}\nSummarize this very concisely in 1-2 friendly sentences to the user in Hinglish."
+                final_summary = self.llm_client.generate(prompt=summary_prompt, stream=False)
+                
+                if final_summary:
+                    yield final_summary
+                else:
+                    yield f"Run ho gaya! Ye lo output:\n{result_msg}"
+            else:
+                log.warning("Sandbox Execution failed. Exit code: %d", exit_code)
+                yield "Code phat gaya container ke andar. Error details dhyan se padho:\n"
+                yield stderr
+
         except Exception as e:
-            log.error(f"Interpreter Execution Crushed: {e}")
-            yield f"Execution buri tarah phat chuka hai: {str(e)[:50]}"
+            log.error(f"Interpreter Engine Crushed: {e}")
+            yield f"Execution pipeline fail ho gaya: {str(e)[:50]}"

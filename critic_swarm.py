@@ -87,4 +87,4 @@ class CriticSwarm:
                 
         except Exception as e:
             log.error("Safety debate crashed: %s", e)
-            return True # Fail open to avoid blocking Pihu completely
+            return False  # FAIL CLOSED: Block execution when safety system fails
