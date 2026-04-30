@@ -50,3 +50,9 @@ models/
 *.gguf
 .pihu/
 .sixth/
+\n+# Ignore large model, TTS and cache artifacts
+data/tts_models/
+.cache/
+huggingface/
+models/**/*.gguf
+node_modules/
