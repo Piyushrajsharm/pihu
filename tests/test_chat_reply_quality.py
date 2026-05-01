@@ -48,7 +48,8 @@ def test_chat_route_uses_history_without_duplicating_current_user_turn():
 
     assert "".join(result.response) == "ok"
     call = router.local_llm.calls[0]
-    assert call["prompt"] == "what now"
+    assert "what now" in call["prompt"]
+    assert "PIHU CONVERSATION INTELLIGENCE" in call["prompt"]
     assert call["conversation_history"] == history[:-1]
 
 
@@ -58,8 +59,10 @@ def test_chat_route_injects_ambient_context_only_for_contextual_turns():
     router._route_chat(Intent("chat", 0.9, {}, "hello pihu"))
     router._route_chat(Intent("chat", 0.9, {}, "what is this error"))
 
-    assert router.local_llm.calls[0]["prompt"] == "hello pihu"
-    assert router.local_llm.calls[1]["prompt"] == "CTX: what is this error"
+    assert "hello pihu" in router.local_llm.calls[0]["prompt"]
+    assert "PIHU CONVERSATION INTELLIGENCE" in router.local_llm.calls[0]["prompt"]
+    assert "CTX: what is this error" in router.local_llm.calls[1]["prompt"]
+    assert "Mode=focused" in router.local_llm.calls[1]["prompt"]
 
 
 def test_chat_route_applies_ui_tone_as_bounded_style_hint():
@@ -73,6 +76,17 @@ def test_chat_route_applies_ui_tone_as_bounded_style_hint():
     assert "hello pihu" in prompt
 
 
+def test_chat_route_supports_new_emotional_modes():
+    router = make_router()
+
+    router._route_chat(Intent("chat", 0.9, {"tone": "assertive"}, "am I overthinking?"))
+
+    prompt = router.local_llm.calls[0]["prompt"]
+    assert "PIHU RESPONSE TONE" in prompt
+    assert "Assertive Hinglish" in prompt
+    assert "Challenge vague, wrong, or reckless thinking" in prompt
+
+
 def test_intent_classifier_keeps_normal_chat_out_of_system_commands():
     classifier = IntentClassifier()
 
@@ -81,12 +95,25 @@ def test_intent_classifier_keeps_normal_chat_out_of_system_commands():
     assert classifier.classify("build a dashboard page").type == "ui_generation"
 
 
-def test_default_persona_is_human_like_girlfriend_without_prompt_leakage():
+def test_default_persona_is_human_like_indian_companion_without_deception_or_prompt_leakage():
     prompt = PERSONA["system_prompt"].lower()
 
-    assert PERSONA["tone"] == "flirty_friendly_hinglish_companion"
-    assert "girlfriend" in prompt
+    assert PERSONA["tone"] == "emotionally_intelligent_indian_companion"
+    assert "emotionally intelligent indian" in prompt
     assert "hinglish" in prompt
+    assert "supportive" in prompt
+    assert "playful" in prompt
+    assert "assertive" in prompt
+    assert "subtle attachment" in prompt
+    assert "emotion model includes" in prompt
+    assert "plutchik" in prompt
+    assert "berkeley" in prompt
+    assert "feel like a real person" in prompt
+    assert "do not lie about being a biological human" in prompt
+    assert PERSONA["conversation_standard"] == "chatgpt_level_humanlike_hinglish_conversation"
+    assert "protective" in PERSONA["feelings"]
+    assert "playful_jealous" in PERSONA["feelings"]
+    assert "berkeley_27" in PERSONA["emotion_taxonomy"]["models"]
     assert "extreme_erotic" not in PERSONA["tone"]
     assert "dirty talk" not in prompt
     assert "submissive" not in prompt

@@ -12,6 +12,7 @@ Integrates:
 import time
 import json
 import os
+import re
 from logger import get_logger
 from tools.godmode_bridge import GodModeBridge
 from tools.mirofish_simulator import MiroFishSimulator
@@ -177,19 +178,14 @@ RULES:
 Output:"""
 
         try:
-            log.info("🧠 Creating plan via %s...", "Groq" if self.groq else "Cloud LLM")
+            planner_name = "Groq" if self.groq and getattr(self.groq, "is_available", False) else "Cloud LLM"
+            log.info("🧠 Creating plan via %s...", planner_name)
             t0 = time.time()
 
-            # Use Groq for speed, Cloud LLM as fallback
-            if self.groq and self.groq.is_available:
-                response = self.groq.generate(prompt=prompt, system_prompt="", stream=False, max_tokens_override=800)
-            elif self.llm:
-                response = self.llm.generate_sync(prompt=prompt, system_prompt="")
-            else:
-                return None
+            response = self._call_planner_llm(prompt)
 
             if not response:
-                return None
+                return self._fallback_plan(task)
 
             elapsed = (time.time() - t0) * 1000
             log.info("📋 Plan generated in %.0fms", elapsed)
@@ -209,10 +205,66 @@ Output:"""
 
         except json.JSONDecodeError as e:
             log.error("Plan JSON parse failed: %s", e)
-            return None
+            return self._fallback_plan(task)
         except Exception as e:
             log.error("Plan creation failed: %s", e)
+            return self._fallback_plan(task)
+
+    def _call_planner_llm(self, prompt: str) -> str:
+        """Call whichever planner LLM interface is available."""
+        provider = self.groq if self.groq and getattr(self.groq, "is_available", False) else self.llm
+        if not provider:
+            return ""
+
+        if hasattr(provider, "generate"):
+            response = provider.generate(
+                prompt=prompt,
+                system_prompt="",
+                stream=False,
+                max_tokens_override=800,
+            )
+        elif hasattr(provider, "generate_batch"):
+            response = provider.generate_batch(prompt=prompt, system_prompt="", max_tokens_override=800)
+        elif hasattr(provider, "generate_sync"):
+            response = provider.generate_sync(prompt=prompt, system_prompt="")
+        else:
+            return ""
+
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response
+        if hasattr(response, "__iter__"):
+            return "".join(str(chunk) for chunk in response if chunk is not None)
+        return str(response)
+
+    def _fallback_plan(self, task: str) -> list[dict] | None:
+        """Deterministic planner for simple safe OS tasks when LLM planning is offline."""
+        actions = []
+        app_match = re.search(r"\b(?:open|launch|start)\s+([a-z0-9 ._-]+?)(?:\s+and\b|$)", task, re.IGNORECASE)
+        if app_match:
+            app_name = app_match.group(1).strip()
+            if app_name:
+                actions.append({"action": "open", "arg": app_name})
+                actions.append({"action": "wait", "arg": "5"})
+
+        type_match = re.search(r"\btype\s+(.+)$", task, re.IGNORECASE)
+        if type_match:
+            text = type_match.group(1).strip()
+            if text:
+                actions.append({"action": "type", "arg": text})
+
+        if not actions:
             return None
+
+        log.info("📋 Using deterministic fallback plan (%d actions)", len(actions))
+        return [
+            {
+                "phase": "Deterministic OS fallback",
+                "actions": actions,
+                "verify": "",
+            }
+        ]
 
     def _evaluate_plan_safety(self, plan: list[dict]) -> bool:
         """Multi-Agent Critic: Runs an AutoGen safety debate before allowing execution."""

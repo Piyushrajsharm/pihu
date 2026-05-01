@@ -36,6 +36,7 @@ class PihuBrain:
         self.mic = None
         self.player = None
         self.memory = None
+        self.advanced_core = None
         self.intent_classifier = None
         self.router = None
         self.pipeline = None
@@ -53,6 +54,7 @@ class PihuBrain:
         from intent_classifier import IntentClassifier
         from llm.llama_cpp_llm import LlamaCppLLM
         from llm.cloud_llm import CloudLLM
+        from llm.groq_llm import GroqLLM
         from tools.web_search import WebSearch
         from router import Router
         from streaming_pipeline import StreamingPipeline
@@ -96,7 +98,13 @@ class PihuBrain:
         self.intent_classifier = IntentClassifier()
 
         from llm.local_llm import LocalLLM
+        from llm.vllm_engine import VllmEngine
+        
         # 7. LLMs (BYOM Provider Setup)
+        vllm = VllmEngine(scheduler=self.scheduler)
+        vllm_health = vllm.health_check()
+        vllm_available = vllm_health.get("available", False)
+        
         ollama_llm = LocalLLM(scheduler=self.scheduler)
         ollama_health = ollama_llm.health_check()
         ollama_model_found = ollama_health.get("available", False)
@@ -104,13 +112,16 @@ class PihuBrain:
         native_llm = LlamaCppLLM(scheduler=self.scheduler)
         native_llm.health_check()
 
-        # Prioritize Ollama if the model is actually present, otherwise native CPU
-        if ollama_model_found:
+        # Prioritize vLLM first, then Ollama, then native CPU fallback
+        if vllm_available:
+            active_local = vllm
+            log.info("🔥 Using vLLM High-Performance Engine: %s", vllm_health.get("model_name"))
+        elif ollama_model_found:
             active_local = ollama_llm
             log.info("✅ Using Ollama LLM: %s", ollama_health.get("model_name"))
         else:
             active_local = native_llm
-            log.info("⚠️ Ollama model not found — falling back to native Phi-3.5 (llama-cpp)")
+            log.info("⚠️ vLLM/Ollama models not found — falling back to native CPU Phi-3.5 (llama-cpp)")
 
         # 7.5 Apply Hardware Profiles to active local model
         active_local.max_tokens = hardware_profile.max_context
@@ -122,9 +133,16 @@ class PihuBrain:
 
         cloud_llm = CloudLLM()
         cloud_llm.health_check()
+        groq_llm = GroqLLM()
+        groq_llm.health_check()
         
         # 8. Memory (Requires LLM for Background Compaction)
         self.memory = MemoryEngine(user_id=self.user_id, backend_mode=self.backend_mode, llm_client=active_local)
+
+        # 8.1 Advanced power-feature core (local deterministic control plane)
+        from advanced_features import PihuAdvancedCore
+        from config import BASE_DIR
+        self.advanced_core = PihuAdvancedCore(workspace=str(BASE_DIR), user_id=self.user_id)
 
         # 8. Tools
         web_search = WebSearch()
@@ -145,6 +163,7 @@ class PihuBrain:
             from tools.automation import AutomationTool
             from tools.pencil_swarm_agent import PencilSwarmAgent
             from tools.mcp_dispatcher import MCPDispatcher
+            from tools.composio_bridge import ComposioBridge
 
             if "VisionAnalysis" in hardware_profile.capabilities_disabled:
                 log.warning("⚙️ Hardware Profiler: Disabling VisionTool (RAM/VRAM limits)")
@@ -163,13 +182,16 @@ class PihuBrain:
                 log.warning("⚙️ Hardware Profiler: Disabling SwarmAgent (RAM/VRAM limits)")
                 swarm = None
             else:
-                swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=None)
+                swarm = PencilSwarmAgent(automation_tool=automation, vision_grounding=grounding, groq_llm=groq_llm)
                 
             mcp = MCPDispatcher()
+            
+            # 8.4 Composio Toolset Integration
+            composio = ComposioBridge(cloud_llm=cloud_llm)
 
             # 8.5 OpenClaw Orchestrator
             from openclaw_bridge import OpenClawBridge
-            openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=None)
+            openclaw = OpenClawBridge(swarm_agent=swarm, automation=automation, groq_llm=groq_llm)
 
         # 8.7 Capability Negotiation
         from capability_negotiator import CapabilityNegotiator
@@ -179,24 +201,50 @@ class PihuBrain:
         else:
             negotiator.evaluate_model("unknown", llm_client=active_local)
 
-        # 9. Router (Primary Engine is now LocalLLM)
-        self.router = Router(
-            capability_negotiator=negotiator,
-            local_llm=active_local,
-            cloud_llm=cloud_llm,
-            groq_llm=None,
-            memory=self.memory,
-            scheduler=self.scheduler,
-            web_search=web_search,
-            vision=vision,
-            automation=automation,
-            voice_os=voice_os,
-            mcp=mcp,
-            swarm=swarm,
-            openclaw=openclaw,
-            backend_mode=self.backend_mode,
-            user_id=self.user_id,
-        )
+        # 9. Router (Stateful or Deterministic)
+        from config import LANGGRAPH_ENABLED
+        if LANGGRAPH_ENABLED:
+            from graph_router import GraphRouter
+            tools_dict = {
+                "vision": vision,
+                "automation": automation,
+                "voice_os": voice_os if not self.backend_mode else None,
+                "mcp": mcp if not self.backend_mode else None,
+                "composio": composio if not self.backend_mode else None,
+                "advanced_core": self.advanced_core,
+                "swarm": swarm,
+                "openclaw": openclaw,
+                "groq": groq_llm,
+            }
+            self.router = GraphRouter(
+                local_llm=active_local,
+                cloud_llm=cloud_llm,
+                intent_classifier=self.intent_classifier,
+                memory=self.memory,
+                tools_dict=tools_dict
+            )
+            log.info("🔀 Router: Stateful LangGraph Engine Active")
+        else:
+            self.router = Router(
+                capability_negotiator=negotiator,
+                local_llm=active_local,
+                cloud_llm=cloud_llm,
+                groq_llm=groq_llm,
+                memory=self.memory,
+                scheduler=self.scheduler,
+                web_search=web_search,
+                vision=vision,
+                automation=automation,
+                voice_os=voice_os,
+                mcp=mcp,
+                composio=composio if not self.backend_mode else None,
+                swarm=swarm,
+                openclaw=openclaw,
+                backend_mode=self.backend_mode,
+                advanced_core=self.advanced_core,
+                user_id=self.user_id,
+            )
+            log.info("🔀 Router: Deterministic Legacy Engine Active")
 
         # 10. Streaming Pipeline
         if not self.backend_mode:
@@ -204,6 +252,17 @@ class PihuBrain:
                 tts_engine=self.tts,
                 audio_player=self.player,
             )
+            
+            # 10.5 Async Pipecat Voice Loop (Optional Next-Gen Voice)
+            from config import PIPECAT_ENABLED
+            if PIPECAT_ENABLED:
+                from tools.pipecat_pipeline import PipecatEngine
+                self.pipecat_engine = PipecatEngine(
+                    tts_engine=self.tts,
+                    stt_engine=self.stt,
+                    cloud_llm=cloud_llm
+                )
+                self.pipecat_engine.start_background()
 
         elapsed = time.time() - t0
         log.info("✅ All modules initialized in %.1fs", elapsed)

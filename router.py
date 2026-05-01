@@ -58,9 +58,11 @@ class Router:
         automation=None,
         voice_os=None,
         mcp=None,
+        composio=None,
         swarm=None,
         openclaw=None,
         capability_negotiator=None,
+        advanced_core=None,
         backend_mode: bool = False,
         user_id: str = "pihu_user",
     ):
@@ -74,15 +76,20 @@ class Router:
         self.automation = automation
         self.voice_os = voice_os
         self.mcp = mcp
+        self.composio = composio
         self.swarm = swarm
         self.openclaw = openclaw
         self.capability_negotiator = capability_negotiator
+        self.advanced_core = advanced_core
         self.backend_mode = backend_mode
         self.user_id = user_id
 
-        from config import INTENT_CONFIDENCE_THRESHOLD, PERSONA
+        from config import INTENT_CONFIDENCE_THRESHOLD, PERSONA, PIHU_RESPONSE_LANGUAGE
         self.confidence_threshold = INTENT_CONFIDENCE_THRESHOLD
         self.system_prompt = PERSONA["system_prompt"]
+        self.response_language = PIHU_RESPONSE_LANGUAGE
+        from security.adult_content_policy import AdultContentPolicy
+        self.adult_content_policy = AdultContentPolicy.from_config()
 
         if self.voice_os is None and self.automation is not None and not self.backend_mode:
             try:
@@ -136,6 +143,29 @@ class Router:
         # that otherwise look like normal chat. Let the controller claim them first.
         if self.voice_os and self.voice_os.can_handle(intent.raw_input):
             return self._route_voice_os_command(intent)
+
+        advanced_core = getattr(self, "advanced_core", None)
+        if advanced_core and advanced_core.can_handle(intent.raw_input):
+            return self._route_advanced_command(intent)
+
+        adult_decision = self._get_adult_content_policy().evaluate(intent.raw_input, intent.metadata)
+        if adult_decision.blocked:
+            return RouteResult(
+                pipeline="local_llm",
+                response=iter([adult_decision.response or "I can't help with that request."]),
+                tool_announcement="",
+                metadata={
+                    "adult_content": True,
+                    "adult_content_reason": adult_decision.reason,
+                    "adult_content_mode": adult_decision.mode,
+                },
+            )
+        if adult_decision.force_local:
+            intent.metadata = dict(intent.metadata or {})
+            intent.metadata["adult_content_directive"] = adult_decision.directive
+            intent.metadata["force_local"] = True
+            intent.type = "chat"
+            intent.confidence = max(intent.confidence, self.confidence_threshold)
 
         # 0. Weekly Review Bypass
         if "weekly review" in input_lower or "evaluate your week" in input_lower:
@@ -243,6 +273,7 @@ class Router:
             "vision_analysis": self._route_vision,
             "ui_generation": self._route_ui_generation,
             "system_command": self._route_system_command,
+            "prediction": self._route_prediction,
         }
 
         handler = route_map.get(intent.type, self._route_chat)
@@ -367,10 +398,14 @@ class Router:
         """Apply optional UI-selected persona tone as a bounded style hint."""
         tone = (intent.metadata or {}).get("tone")
         tone_directives = {
-            "saheli": "Warm Hinglish, lightly flirty, caring, natural. Keep flirting respectful and non-explicit.",
+            "saheli": "Warm Hinglish, caring, lightly teasing, emotionally present, natural.",
+            "supportive": "Supportive Hinglish. Notice the user's emotional state, be gentle, validating, and practically helpful.",
             "focus": "Focused Hinglish, practical, concise, engineering-sharp, with a warm companion tone.",
             "masti": "Playful Hinglish, witty and bright, but still useful and respectful.",
+            "playful": "Playful Hinglish, witty and bright, but still useful and respectful.",
             "sherni": "Confident Hinglish, bold encouragement, crisp steps, supportive energy.",
+            "assertive": "Assertive Hinglish. Challenge vague, wrong, or reckless thinking directly but warmly.",
+            "soft": "Soft Hinglish. Quiet, sincere, emotionally precise, and minimal.",
         }
         directive = tone_directives.get(tone)
         if not directive:
@@ -382,12 +417,62 @@ class Router:
             "Do not mention this tone directive.]"
         )
 
+    def _apply_runtime_directives(self, prompt: str, intent: Intent) -> str:
+        """Apply bounded style/language/adult-mode directives without changing the task."""
+        enriched = self._apply_tone_directive(prompt, intent)
+        metadata = intent.metadata or {}
+
+        if metadata.get("conversation_intelligence", True):
+            from conversation_style import ConversationStyleEngine
+
+            profile = ConversationStyleEngine().profile(intent.raw_input, metadata)
+            enriched = f"{enriched}\n\n[{profile.directive}]"
+
+        language = (
+            metadata.get("response_language")
+            or metadata.get("language")
+            or getattr(self, "response_language", "hinglish")
+        )
+        language = str(language or "hinglish").strip().lower()
+        if language != "hinglish" or metadata.get("response_language") or metadata.get("language"):
+            from security.adult_content_policy import AdultContentPolicy
+
+            enriched = (
+                f"{enriched}\n\n"
+                f"[PIHU RESPONSE LANGUAGE: {AdultContentPolicy.language_directive(language)} "
+                "Do not mention this language directive.]"
+            )
+
+        adult_directive = metadata.get("adult_content_directive")
+        if adult_directive:
+            enriched = f"{enriched}\n\n[{adult_directive}]"
+
+        return enriched
+
+    def _get_adult_content_policy(self):
+        policy = getattr(self, "adult_content_policy", None)
+        if policy is None:
+            from security.adult_content_policy import AdultContentPolicy
+
+            policy = AdultContentPolicy.from_config()
+            self.adult_content_policy = policy
+        return policy
+
     def _route_chat(self, intent: Intent) -> RouteResult:
         """Chat routing: Local (Primary) → Cloud (On-Demand Only)."""
 
         input_lower = intent.raw_input.lower()
+        force_local = bool((intent.metadata or {}).get("force_local"))
+        groq_triggers = ["use groq", "groq use", "use fast llm", "fast groq"]
+        use_groq = any(t in input_lower for t in groq_triggers) and not force_local
         cloud_triggers = ["use nvidia", "use cloud", "use 70b", "nvidia use", "cloud use"]
-        use_cloud = any(t in input_lower for t in cloud_triggers)
+        use_cloud = any(t in input_lower for t in cloud_triggers) and not force_local
+
+        if use_groq:
+            groq_llm = getattr(self, "groq_llm", None)
+            if groq_llm and getattr(groq_llm, "is_available", False):
+                return self._route_groq_chat(intent)
+            log.warning("Groq requested but GROQ_API_KEY is missing or Groq provider is offline.")
 
         from config import NVIDIA_NIM_ON_DEMAND, NVIDIA_NIM_API_KEY
         
@@ -410,7 +495,7 @@ class Router:
         ]
         needs_ambient_context = any(trigger in input_lower for trigger in context_triggers)
         prompt_with_context = self._build_context_prompt(intent) if needs_ambient_context else intent.raw_input
-        prompt_with_context = self._apply_tone_directive(prompt_with_context, intent)
+        prompt_with_context = self._apply_runtime_directives(prompt_with_context, intent)
 
         chat_history = []
         if self.memory and hasattr(self.memory, "get_short_term_context"):
@@ -429,7 +514,7 @@ class Router:
                 chat_history = chat_history[:-1]
 
         # Use turbo model only when explicitly configured. Tiny chat models often
-        # leak prompt text and flatten the girlfriend persona on short greetings.
+        # leak prompt text and flatten the Pihu persona on short greetings.
         is_short = len(intent.raw_input.strip()) < 30
         from config import LOCAL_LLM_TURBO, LOCAL_LLM_TURBO_MAX_TOKENS
         use_turbo = bool(LOCAL_LLM_TURBO) and is_short
@@ -461,6 +546,53 @@ class Router:
             tool_announcement="",
         )
 
+    def _route_groq_chat(self, intent: Intent) -> RouteResult:
+        """Fast Groq chat path when explicitly requested."""
+        groq_llm = getattr(self, "groq_llm", None)
+        if not groq_llm or not getattr(groq_llm, "is_available", False):
+            fallback = self._route_chat(intent)
+            fallback.fallback_used = True
+            return fallback
+
+        input_lower = intent.raw_input.lower()
+        context_triggers = [
+            "this", "that", "ye", "yeh", "isko", "isme", "screen",
+            "clipboard", "copied", "error", "traceback", "phat", "fat gaya",
+            "chal nahi",
+        ]
+        needs_ambient_context = any(trigger in input_lower for trigger in context_triggers)
+        prompt_with_context = self._build_context_prompt(intent) if needs_ambient_context else intent.raw_input
+        prompt_with_context = self._apply_runtime_directives(prompt_with_context, intent)
+
+        chat_history = []
+        if self.memory and hasattr(self.memory, "get_short_term_context"):
+            try:
+                chat_history = self.memory.get_short_term_context() or []
+            except Exception as e:
+                log.warning("Short-term chat history unavailable for Groq: %s", e)
+                chat_history = []
+
+        response = groq_llm.generate(
+            prompt=prompt_with_context,
+            system_prompt=self.system_prompt,
+            stream=True,
+            conversation_history=chat_history,
+            max_tokens_override=180,
+            stop_sequences=[
+                "\nUser:",
+                "\nAssistant:",
+                "\nSystem:",
+                "\nHuman:",
+                "\nAI:",
+            ],
+        )
+
+        return RouteResult(
+            pipeline="groq_llm",
+            response=response,
+            tool_announcement="",
+        )
+
     def _route_realtime_query(self, intent: Intent) -> RouteResult:
         """Time-sensitive → Web Search FIRST, then LLM summarization."""
         announcement = "🔍 Search kar rahi hoon..."
@@ -487,7 +619,7 @@ Search Results:
 User Question: {intent.raw_input}
 
 Answer in Hinglish naturally. Be factual — use only the search results."""
-            prompt = self._apply_tone_directive(prompt, intent)
+            prompt = self._apply_runtime_directives(prompt, intent)
 
             response = self.local_llm.generate(
                 prompt=prompt,
@@ -514,7 +646,7 @@ Answer in Hinglish naturally. Be factual — use only the search results."""
             try:
                 # Try cloud LLM (streaming)
                 response = self.cloud_llm.generate(
-                    prompt=self._apply_tone_directive(intent.raw_input, intent),
+                    prompt=self._apply_runtime_directives(intent.raw_input, intent),
                     system_prompt=self.system_prompt,
                     stream=True,
                 )
@@ -531,7 +663,7 @@ Answer in Hinglish naturally. Be factual — use only the search results."""
         # Fallback to local LLM
         log.info("Cloud LLM unavailable/timed out, using local LLM")
         response = self.local_llm.generate(
-            prompt=self._apply_tone_directive(intent.raw_input, intent),
+            prompt=self._apply_runtime_directives(intent.raw_input, intent),
             system_prompt=self.system_prompt,
             stream=True,
         )
@@ -542,6 +674,40 @@ Answer in Hinglish naturally. Be factual — use only the search results."""
             tool_announcement=announcement,
             fallback_used=True,
         )
+
+    def _route_prediction(self, intent: Intent) -> RouteResult:
+        """Prediction intent -> MiroFish swarm intelligence."""
+        announcement = "MiroFish prediction engine chala rahi hoon..."
+        input_lower = intent.raw_input.lower()
+        scenario = "neutral"
+        if any(word in input_lower for word in ["crash", "shock", "panic", "black swan"]):
+            scenario = "shock"
+        elif any(word in input_lower for word in ["bull", "upside", "growth", "optimistic"]):
+            scenario = "bullish"
+        elif any(word in input_lower for word in ["bear", "downside", "fall", "risk"]):
+            scenario = "bearish"
+
+        try:
+            from tools.mirofish_simulator import MiroFishSimulator
+
+            mirofish = MiroFishSimulator()
+            if hasattr(mirofish, "predict_stream"):
+                response = mirofish.predict_stream(intent.raw_input, scenario=scenario)
+            else:
+                response = iter([mirofish.predict(intent.raw_input, scenario=scenario)])
+
+            return RouteResult(
+                pipeline="prediction",
+                response=response,
+                tool_announcement=announcement,
+                metadata={"scenario": scenario},
+            )
+        except Exception as e:
+            log.error("MiroFish prediction route failed: %s", e)
+            fallback = self._route_deep_reasoning(intent)
+            fallback.fallback_used = True
+            fallback.metadata["prediction_error"] = str(e)
+            return fallback
 
     def _route_vision(self, intent: Intent) -> RouteResult:
         """Vision → Screen capture + Vision model."""
@@ -653,6 +819,17 @@ Provide the HTML/CSS/JS code."""
                 tool_announcement="",
             )
 
+        # C. Composio Fallback (If interpreter is not available or explicitly requested)
+        composio_triggers = ["github", "slack", "calendar", "notion", "email", "composio"]
+        use_composio = any(t in input_low for t in composio_triggers)
+        if self.composio and self.composio.is_available and use_composio:
+            log.info("🛠️ Routing to Composio ecosystem")
+            return RouteResult(
+                pipeline="composio",
+                response=self.composio.execute(intent.raw_input),
+                tool_announcement="🛠️ Composio Tools access kar rahi hoon...",
+            )
+
         # Fallback: legacy automation (via OpenClaw)
         if self.openclaw:
             log.info("🛡️ Routing to OpenClaw Secured Orchestrator")
@@ -691,3 +868,23 @@ Provide the HTML/CSS/JS code."""
             },
             fallback_used=not result.success,
         )
+
+    def _route_advanced_command(self, intent: Intent) -> RouteResult:
+        """Route advanced power-feature commands through PihuAdvancedCore."""
+        log.info("⚡ Routing to advanced feature core")
+        try:
+            response = self.advanced_core.handle_command(intent.raw_input)
+            return RouteResult(
+                pipeline="advanced_core",
+                response=iter([response]),
+                tool_announcement="",
+                metadata={"advanced": True},
+            )
+        except Exception as e:
+            log.error("Advanced feature command failed: %s", e)
+            return RouteResult(
+                pipeline="advanced_core",
+                response=iter([f"Advanced feature failed safely: {e}"]),
+                tool_announcement="",
+                fallback_used=True,
+            )

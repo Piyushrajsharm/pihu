@@ -3,6 +3,7 @@ Pihu — Cloud LLM Engine
 NVIDIA NIM API integration with DeepSeek/Llama for heavy reasoning.
 """
 
+import hashlib
 import time
 import requests
 import json
@@ -19,9 +20,12 @@ class CloudLLM(BaseProvider):
     Uses connection pooling for improved performance and resource management.
     """
 
+    _AUTH_FAILED_KEY_HASHES: set[str] = set()
+
     def __init__(self):
         import config
         self.api_key = getattr(config, "NVIDIA_NIM_API_KEY", "")
+        self._api_key_hash = self._hash_key(self.api_key)
         self.base_url = getattr(config, "NVIDIA_NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
         self.model = getattr(config, "CLOUD_LLM_MODEL", "meta/llama-3.1-70b-instruct")
         self.vision_model = getattr(config, "CLOUD_VISION_MODEL", "meta/llama-3.2-11b-vision-instruct")
@@ -29,6 +33,8 @@ class CloudLLM(BaseProvider):
         self.max_tokens = getattr(config, "CLOUD_LLM_MAX_TOKENS", 4096)
         self.temperature = getattr(config, "CLOUD_LLM_TEMPERATURE", 0.4)
         self.top_p = getattr(config, "CLOUD_LLM_TOP_P", 0.9)
+        self._availability_checked = self._api_key_hash in self._AUTH_FAILED_KEY_HASHES
+        self._api_key_valid = bool(self.api_key) and self._api_key_hash not in self._AUTH_FAILED_KEY_HASHES
 
         # Connection pooling for better performance
         self._session = requests.Session()
@@ -51,22 +57,32 @@ class CloudLLM(BaseProvider):
 
     @property
     def is_available(self) -> bool:
-        return bool(self.api_key)
+        if not self.api_key:
+            return False
+        if not self._availability_checked:
+            self.health_check()
+        return self._api_key_valid
 
     def health_check(self) -> dict[str, Any]:
         """Verify network reachability of the cloud API."""
-        if not self.is_available:
+        if not self.api_key:
+            self._availability_checked = True
+            self._api_key_valid = False
             return {"available": False, "latency_ms": 0, "model_name": self.model, "error": "No API key"}
             
         t0 = time.time()
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             # We hit the models endpoint for a quick ping
-            res = requests.get(f"{self.base_url}/models", headers=headers, timeout=5)
+            res = self._session.get(f"{self.base_url}/models", headers=headers, timeout=5)
             res.raise_for_status()
             latency = int((time.time() - t0) * 1000)
+            self._availability_checked = True
+            self._api_key_valid = True
             return {"available": True, "latency_ms": latency, "model_name": self.model}
         except Exception as e:
+            self._availability_checked = True
+            self._api_key_valid = False
             return {"available": False, "latency_ms": int((time.time() - t0) * 1000), "model_name": self.model, "error": str(e)}
 
     def calculate_cost(self, prompt_tokens: int, completion_tokens: int) -> float:
@@ -142,6 +158,7 @@ class CloudLLM(BaseProvider):
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
+            self._mark_unavailable_on_auth_error(e)
             log.warning("☁️ Cloud connection failed: %s", e)
             return
 
@@ -198,6 +215,7 @@ class CloudLLM(BaseProvider):
             log.info("☁️ Cloud batch response in %.0fms", (time.time() - t0) * 1000)
             return text
         except Exception as e:
+            self._mark_unavailable_on_auth_error(e)
             log.error("☁️ Cloud batch failed: %s", e)
             return None
 
@@ -259,5 +277,20 @@ class CloudLLM(BaseProvider):
             response.raise_for_status()
             return response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
         except Exception as e:
+            self._mark_unavailable_on_auth_error(e)
             log.error("Cloud Vision error: %s", e)
             return None
+
+    def _mark_unavailable_on_auth_error(self, exc: Exception) -> None:
+        text = str(exc)
+        if "401" in text or "403" in text or "Unauthorized" in text or "Forbidden" in text:
+            self._availability_checked = True
+            self._api_key_valid = False
+            if self._api_key_hash:
+                self._AUTH_FAILED_KEY_HASHES.add(self._api_key_hash)
+
+    @staticmethod
+    def _hash_key(api_key: str) -> str:
+        if not api_key:
+            return ""
+        return hashlib.sha256(api_key.encode("utf-8")).hexdigest()

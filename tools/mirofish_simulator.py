@@ -139,6 +139,14 @@ class MiroFishSimulator:
 
         return self._format_output(prediction)
 
+    def _pattern_prediction(self, query: str, scenario: str = "neutral") -> str:
+        """Legacy no-API prediction path used by older system tests."""
+        t0 = time.time()
+        for agent in self.agents:
+            self._heuristic_analysis(agent, query, scenario)
+        prediction = self._aggregate(query, scenario, time.time() - t0)
+        return self._format_output(prediction)
+
     def predict_stream(self, query: str, data_context: str = "", scenario: str = "neutral") -> Generator[str, None, None]:
         """Stream prediction results as they come in — for real-time UI."""
         t0 = time.time()

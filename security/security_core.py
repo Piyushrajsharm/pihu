@@ -355,6 +355,11 @@ class ThreatAssessor:
         "copy", "move", "rename", "mkdir",
         "powershell", "cmd", "bash",
     ]
+    LOW_PATTERNS = [
+        "open ", "launch ", "start ", "close ",
+        "kholo", "khol ", "chalao",
+        "notepad", "calculator", "chrome", "browser", "whatsapp",
+    ]
 
     def assess(self, command: str) -> ThreatAssessment:
         cmd_lower = command.lower()
@@ -375,6 +380,10 @@ class ThreatAssessor:
             if pattern in cmd_lower:
                 risks.append(f"Medium-risk: '{pattern}'")
                 return ThreatAssessment(level=ThreatLevel.MEDIUM, label="MEDIUM", risks=risks, requires_confirmation=False, blocked=False)
+        for pattern in self.LOW_PATTERNS:
+            if pattern in cmd_lower:
+                risks.append(f"Low-risk OS action: '{pattern.strip()}'")
+                return ThreatAssessment(level=ThreatLevel.LOW, label="LOW", risks=risks, requires_confirmation=False, blocked=False)
         return ThreatAssessment(level=ThreatLevel.SAFE, label="SAFE", risks=[], requires_confirmation=False, blocked=False)
 
 
